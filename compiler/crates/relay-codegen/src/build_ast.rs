@@ -12,13 +12,11 @@ use graphql_ir::Condition;
 use graphql_ir::ConditionValue;
 use graphql_ir::ConstantValue;
 use graphql_ir::Directive;
-use graphql_ir::ExecutableDefinitionName;
 use graphql_ir::FragmentDefinition;
 use graphql_ir::FragmentSpread;
 use graphql_ir::InlineFragment;
 use graphql_ir::LinkedField;
 use graphql_ir::OperationDefinition;
-use graphql_ir::OperationDefinitionName;
 use graphql_ir::ProvidedVariableMetadata;
 use graphql_ir::ScalarField;
 use graphql_ir::Selection;
@@ -60,10 +58,7 @@ use relay_transforms::DEFER_STREAM_CONSTANTS;
 use relay_transforms::DIRECTIVE_SPLIT_OPERATION;
 use relay_transforms::INLINE_DIRECTIVE_NAME;
 use relay_transforms::INTERNAL_METADATA_DIRECTIVE;
-use relay_transforms::REACT_FLIGHT_SCALAR_FLIGHT_FIELD_METADATA_KEY;
 use relay_transforms::RELAY_ACTOR_CHANGE_DIRECTIVE_FOR_CODEGEN;
-use relay_transforms::RELAY_CLIENT_COMPONENT_MODULE_ID_ARGUMENT_NAME;
-use relay_transforms::RELAY_CLIENT_COMPONENT_SERVER_DIRECTIVE_NAME;
 use relay_transforms::TYPE_DISCRIMINATOR_DIRECTIVE_NAME;
 use schema::SDLSchema;
 use schema::Schema;
@@ -438,10 +433,13 @@ impl<'schema, 'builder, 'config> CodegenBuilder<'schema, 'builder, 'config> {
                     ),
                 operation: Primitive::GraphQLModuleDependency(GraphQLModuleDependency::Name(refetch_metadata.operation_name.into())),
             };
-            if let Some(identifier_field) = refetch_metadata.identifier_field {
+            if let Some(identifier_info) = &refetch_metadata.identifier_info {
                 refetch_object.push(ObjectEntry {
-                    key: CODEGEN_CONSTANTS.identifier_field,
-                    value: Primitive::String(identifier_field),
+                    key: CODEGEN_CONSTANTS.identifier_info,
+                    value: Primitive::Key(self.object(object! {
+                        identifier_field:  Primitive::String(identifier_info.identifier_field),
+                        identifier_query_variable_name:  Primitive::String(identifier_info.identifier_query_variable_name),
+                    })),
                 });
             }
 
@@ -702,20 +700,13 @@ impl<'schema, 'builder, 'config> CodegenBuilder<'schema, 'builder, 'config> {
         let (name, alias) =
             self.build_field_name_and_alias(schema_field.name.item, field.alias, &field.directives);
         let args = self.build_arguments(&field.arguments);
-        let kind = match field
-            .directives
-            .named(*REACT_FLIGHT_SCALAR_FLIGHT_FIELD_METADATA_KEY)
-        {
-            Some(_flight_directive) => Primitive::String(CODEGEN_CONSTANTS.flight_field),
-            None => Primitive::String(CODEGEN_CONSTANTS.scalar_field),
-        };
         let primitive = Primitive::Key(self.object(object! {
             :build_alias(alias, name),
             args: match args {
                     None => Primitive::SkippableNull,
                     Some(key) => Primitive::Key(key),
                 },
-            kind: kind,
+            kind: Primitive::String(CODEGEN_CONSTANTS.scalar_field),
             name: Primitive::String(name),
             storage_key: match args {
                     None => Primitive::SkippableNull,
@@ -928,14 +919,6 @@ impl<'schema, 'builder, 'config> CodegenBuilder<'schema, 'builder, 'config> {
 
             return self
                 .build_normalization_fragment_spread(frag_spread, normalization_import_path);
-        }
-        if self.variant == CodegenVariant::Normalization
-            && frag_spread
-                .directives
-                .named(*RELAY_CLIENT_COMPONENT_SERVER_DIRECTIVE_NAME)
-                .is_some()
-        {
-            return self.build_relay_client_component_fragment_spread(frag_spread);
         }
         let args = self.build_arguments(&frag_spread.arguments);
         let primitive = Primitive::Key(self.object(object! {
@@ -1150,39 +1133,8 @@ impl<'schema, 'builder, 'config> CodegenBuilder<'schema, 'builder, 'config> {
                     name: frag_spread.fragment.item.into(),
                 }),
                 kind: Primitive::String(
-                        if frag_spread
-                            .directives
-                            .named(*RELAY_CLIENT_COMPONENT_SERVER_DIRECTIVE_NAME)
-                            .is_some()
-                        {
-                            CODEGEN_CONSTANTS.client_component
-                        } else {
                             CODEGEN_CONSTANTS.fragment_spread
-                        },
                     ),
-        }))
-    }
-
-    fn build_relay_client_component_fragment_spread(
-        &mut self,
-        frag_spread: &FragmentSpread,
-    ) -> Primitive {
-        let normalization_name = frag_spread
-            .directives
-            .named(*RELAY_CLIENT_COMPONENT_SERVER_DIRECTIVE_NAME)
-            .unwrap()
-            .arguments
-            .named(*RELAY_CLIENT_COMPONENT_MODULE_ID_ARGUMENT_NAME)
-            .unwrap()
-            .value
-            .item
-            .expect_string_literal()
-            .to_string()
-            .trim_end_matches(".graphql")
-            .intern();
-        Primitive::Key(self.object(object! {
-            fragment: Primitive::GraphQLModuleDependency(GraphQLModuleDependency::Name(ExecutableDefinitionName::OperationDefinitionName(OperationDefinitionName(normalization_name)))),
-            kind: Primitive::String(CODEGEN_CONSTANTS.client_component),
         }))
     }
 
@@ -1861,11 +1813,14 @@ impl<'schema, 'builder, 'config> CodegenBuilder<'schema, 'builder, 'config> {
                         )
                     };
 
+                let variable_name =
+                    (provider.original_variable_name.to_string() + "_provider").intern();
+
                 Some(ObjectEntry {
                     key: def.name.item.0,
                     value: Primitive::JSModuleDependency(JSModuleDependency {
                         path: provider_module,
-                        import_name: ModuleImportName::Default(provider.module_name),
+                        import_name: ModuleImportName::Default(variable_name),
                     }),
                 })
             })
@@ -1921,20 +1876,16 @@ impl<'schema, 'builder, 'config> CodegenBuilder<'schema, 'builder, 'config> {
         // Construct metadata object
         let mut params_object = vec![];
 
-        match (&request_parameters.text, request_parameters.id) {
-            (Some(ref text), _) => {
-                params_object.push(ObjectEntry {
-                    key: CODEGEN_CONSTANTS.cache_id,
-                    value: Primitive::RawString(md5(&text)),
-                });
-            }
-            (None, None) => {
-                params_object.push(ObjectEntry {
-                    key: CODEGEN_CONSTANTS.cache_id,
-                    value: Primitive::RawString(md5(operation.name.item.0.lookup())),
-                });
-            }
-            _ => (),
+        if let Some(ref text) = &request_parameters.text {
+            params_object.push(ObjectEntry {
+                key: CODEGEN_CONSTANTS.cache_id,
+                value: Primitive::RawString(md5(text)),
+            });
+        } else if request_parameters.id.is_none() {
+            params_object.push(ObjectEntry {
+                key: CODEGEN_CONSTANTS.cache_id,
+                value: Primitive::RawString(md5(operation.name.item.0.lookup())),
+            });
         }
 
         params_object.push(ObjectEntry {

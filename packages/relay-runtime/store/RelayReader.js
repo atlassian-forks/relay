@@ -16,7 +16,6 @@ import type {
   ReaderAliasedFragmentSpread,
   ReaderClientEdgeToClientObject,
   ReaderClientEdgeToServerObject,
-  ReaderFlightField,
   ReaderFragment,
   ReaderFragmentSpread,
   ReaderInlineDataFragmentSpread,
@@ -57,7 +56,6 @@ const {
   CLIENT_EXTENSION,
   CONDITION,
   DEFER,
-  FLIGHT_FIELD,
   FRAGMENT_SPREAD,
   INLINE_DATA_FRAGMENT_SPREAD,
   INLINE_FRAGMENT,
@@ -75,7 +73,6 @@ const {
 } = require('./experimental-live-resolvers/LiveResolverSuspenseSentinel');
 const RelayConcreteVariables = require('./RelayConcreteVariables');
 const RelayModernRecord = require('./RelayModernRecord');
-const {getReactFlightClientResponse} = require('./RelayStoreReactFlightUtils');
 const {
   CLIENT_EDGE_TRAVERSAL_PATH,
   FRAGMENT_OWNER_KEY,
@@ -284,11 +281,7 @@ class RelayReader {
     return this._variables[name];
   }
 
-  _maybeReportUnexpectedNull(
-    fieldPath: string,
-    action: 'LOG' | 'THROW',
-    _record: Record,
-  ) {
+  _maybeReportUnexpectedNull(fieldPath: string, action: 'LOG' | 'THROW') {
     if (this._missingRequiredFields?.action === 'THROW') {
       // Chained @required directives may cause a parent `@required(action:
       // THROW)` field to become null, so the first missing field we
@@ -335,7 +328,7 @@ class RelayReader {
           if (fieldValue == null) {
             const {action} = selection;
             if (action !== 'NONE') {
-              this._maybeReportUnexpectedNull(selection.path, action, record);
+              this._maybeReportUnexpectedNull(selection.path, action);
             }
             // We are going to throw, or our parent is going to get nulled out.
             // Either way, sibling values are going to be ignored, so we can
@@ -452,13 +445,6 @@ class RelayReader {
           }
           break;
         }
-        case FLIGHT_FIELD:
-          if (RelayFeatureFlags.ENABLE_REACT_FLIGHT_COMPONENT_FIELD) {
-            this._readFlightField(selection, record, data);
-          } else {
-            throw new Error('Flight fields are not yet supported.');
-          }
-          break;
         case ACTOR_CHANGE:
           this._readActorChange(selection, record, data);
           break;
@@ -697,7 +683,7 @@ class RelayReader {
     field: ReaderClientEdgeToServerObject | ReaderClientEdgeToClientObject,
     record: Record,
     data: SelectorData,
-  ): void {
+  ): ?mixed {
     const backingField = field.backingField;
 
     // Because ReaderClientExtension doesn't have `alias` or `name` and so I don't know
@@ -719,7 +705,7 @@ class RelayReader {
       isSuspenseSentinel(clientEdgeResolverResponse)
     ) {
       data[applicationName] = clientEdgeResolverResponse;
-      return;
+      return clientEdgeResolverResponse;
     }
 
     const validClientEdgeResolverResponse =
@@ -733,14 +719,15 @@ class RelayReader {
           this._resolverCache,
         );
         this._clientEdgeTraversalPath.push(null);
-        data[applicationName] = this._readLinkedIds(
+        const edgeValues = this._readLinkedIds(
           field.linkedField,
           storeIDs,
           record,
           data,
         );
         this._clientEdgeTraversalPath.pop();
-        break;
+        data[applicationName] = edgeValues;
+        return edgeValues;
 
       case 'SingularConcrete':
         const [storeID, traversalPathSegment] =
@@ -760,51 +747,18 @@ class RelayReader {
           RelayModernRecord.getDataID(record),
           prevData,
         );
-        data[applicationName] = this._traverse(
+        const edgeValue = this._traverse(
           field.linkedField,
           storeID,
           // $FlowFixMe[incompatible-variance]
           prevData,
         );
         this._clientEdgeTraversalPath.pop();
-        break;
+        data[applicationName] = edgeValue;
+        return edgeValue;
       default:
         (validClientEdgeResolverResponse.kind: empty);
     }
-  }
-
-  _readFlightField(
-    field: ReaderFlightField,
-    record: Record,
-    data: SelectorData,
-  ): ?mixed {
-    const applicationName = field.alias ?? field.name;
-    const storageKey = getStorageKey(field, this._variables);
-    const reactFlightClientResponseRecordID =
-      RelayModernRecord.getLinkedRecordID(record, storageKey);
-    if (reactFlightClientResponseRecordID == null) {
-      data[applicationName] = reactFlightClientResponseRecordID;
-      if (reactFlightClientResponseRecordID === undefined) {
-        this._markDataAsMissing();
-      }
-      return reactFlightClientResponseRecordID;
-    }
-    const reactFlightClientResponseRecord = this._recordSource.get(
-      reactFlightClientResponseRecordID,
-    );
-    this._seenRecords.add(reactFlightClientResponseRecordID);
-    if (reactFlightClientResponseRecord == null) {
-      data[applicationName] = reactFlightClientResponseRecord;
-      if (reactFlightClientResponseRecord === undefined) {
-        this._markDataAsMissing();
-      }
-      return reactFlightClientResponseRecord;
-    }
-    const clientResponse = getReactFlightClientResponse(
-      reactFlightClientResponseRecord,
-    );
-    data[applicationName] = clientResponse;
-    return clientResponse;
   }
 
   _readScalar(

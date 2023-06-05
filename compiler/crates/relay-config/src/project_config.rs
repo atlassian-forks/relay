@@ -101,6 +101,9 @@ pub struct LocalPersistConfig {
 
     #[serde(default)]
     pub algorithm: LocalPersistAlgorithm,
+
+    #[serde(default)]
+    pub include_query_text: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -108,6 +111,15 @@ pub struct LocalPersistConfig {
 pub enum PersistConfig {
     Remote(RemotePersistConfig),
     Local(LocalPersistConfig),
+}
+
+impl PersistConfig {
+    pub fn include_query_text(&self) -> bool {
+        match self {
+            PersistConfig::Remote(remote_config) => remote_config.include_query_text,
+            PersistConfig::Local(local_config) => local_config.include_query_text,
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for PersistConfig {
@@ -159,6 +171,10 @@ pub struct SchemaConfig {
     #[serde(default = "default_node_interface_id_field")]
     pub node_interface_id_field: StringKey,
 
+    /// The name of the variable expected by the `node` query.
+    #[serde(default = "default_node_interface_id_variable_name")]
+    pub node_interface_id_variable_name: StringKey,
+
     #[serde(default)]
     pub non_node_id_fields: Option<NonNodeIdFieldsConfig>,
 
@@ -171,6 +187,10 @@ fn default_node_interface_id_field() -> StringKey {
     "id".intern()
 }
 
+fn default_node_interface_id_variable_name() -> StringKey {
+    "id".intern()
+}
+
 fn default_unselectable_directive_name() -> DirectiveName {
     DirectiveName("unselectable".intern())
 }
@@ -180,6 +200,7 @@ impl Default for SchemaConfig {
         Self {
             connection_interface: ConnectionInterface::default(),
             node_interface_id_field: default_node_interface_id_field(),
+            node_interface_id_variable_name: default_node_interface_id_variable_name(),
             non_node_id_fields: None,
             unselectable_directive_name: default_unselectable_directive_name(),
         }
