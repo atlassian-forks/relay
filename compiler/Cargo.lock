@@ -1443,6 +1443,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "persisted-mocks"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "common",
+ "intern",
+ "log",
+ "relay-codegen",
+ "relay-compiler",
+ "relay-lsp",
+ "relay-transforms",
+ "schema",
+ "schema-documentation",
+ "serde",
+ "serde_json",
+ "signedsource",
+ "simplelog",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1610,10 +1632,15 @@ dependencies = [
  "common",
  "intern",
  "log",
+ "persisted-mocks",
+ "relay-codegen",
  "relay-compiler",
  "relay-lsp",
  "schema",
  "schema-documentation",
+ "serde",
+ "serde_json",
+ "signedsource",
  "simplelog",
  "thiserror",
  "tokio",
