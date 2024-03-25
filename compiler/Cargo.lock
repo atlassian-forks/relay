@@ -1836,6 +1836,7 @@ name = "relay-schema"
 version = "0.0.0"
 dependencies = [
  "common",
+ "docblock-shared",
  "intern",
  "lazy_static",
  "schema",
@@ -1875,6 +1876,7 @@ dependencies = [
  "parking_lot",
  "regex",
  "relay-config",
+ "relay-schema",
  "relay-test-schema",
  "rustc-hash",
  "schema",
