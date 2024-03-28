@@ -239,7 +239,7 @@ export type ReaderRequiredField = {
   +path: string,
 };
 
-type ResolverFunction = (...args: Array<any>) => mixed; // flowlint-line unclear-type:off
+export type ResolverFunction = (...args: Array<any>) => mixed; // flowlint-line unclear-type:off
 // With ES6 imports, a resolver function might be exported under the `default` key.
 export type ResolverModule = ResolverFunction | {default: ResolverFunction};
 
@@ -274,6 +274,9 @@ export type ReaderRelayLiveResolver = {
 export type ReaderClientEdgeToClientObject = {
   +kind: 'ClientEdgeToClientObject',
   +concreteType: string | null,
+  +modelResolvers: {
+    [string]: ReaderRelayResolver | ReaderRelayLiveResolver,
+  } | null,
   +linkedField: ReaderLinkedField,
   +backingField:
     | ReaderRelayResolver
