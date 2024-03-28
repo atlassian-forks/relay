@@ -38,7 +38,6 @@ export type Arguments = {
 
 const {VARIABLE, LITERAL, OBJECT_VALUE, LIST_VALUE} = RelayConcreteNode;
 
-const ERRORS_KEY: '__errors' = '__errors';
 const MODULE_COMPONENT_KEY_PREFIX = '__module_component_';
 const MODULE_OPERATION_KEY_PREFIX = '__module_operation_';
 
@@ -80,7 +79,7 @@ function getArgumentValues(
     FRAGMENT_POINTER_IS_WITHIN_UNMATCHED_TYPE_REFINEMENT?: boolean,
     [string]: mixed,
   } = {};
-  if (isWithinUnmatchedTypeRefinement) {
+  if (isWithinUnmatchedTypeRefinement == true) {
     values[
       RelayStoreUtils.FRAGMENT_POINTER_IS_WITHIN_UNMATCHED_TYPE_REFINEMENT
     ] = true;
@@ -258,7 +257,6 @@ const RelayStoreUtils = {
     '$isWithinUnmatchedTypeRefinement',
   FRAGMENT_PROP_NAME_KEY: '__fragmentPropName',
   MODULE_COMPONENT_KEY: '__module_component', // alias returned by Reader
-  ERRORS_KEY,
   ID_KEY: '__id',
   REF_KEY: '__ref',
   REFS_KEY: '__refs',

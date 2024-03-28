@@ -11,7 +11,7 @@
 
 'use strict';
 
-import type {QueryResult} from './QueryResource';
+import type {QueryResult} from '../QueryResource';
 import type {
   CacheConfig,
   FetchPolicy,
@@ -26,12 +26,12 @@ import type {
   MissingLiveResolverField,
 } from 'relay-runtime/store/RelayStoreTypes';
 
-const {getQueryResourceForEnvironment} = require('./QueryResource');
-const useRelayEnvironment = require('./useRelayEnvironment');
+const {getQueryResourceForEnvironment} = require('../QueryResource');
+const useRelayEnvironment = require('../useRelayEnvironment');
 const invariant = require('invariant');
 const {useDebugValue, useEffect, useMemo, useRef, useState} = require('react');
 const {
-  __internal: {fetchQuery: fetchQueryInternal, getPromiseForActiveRequest},
+  __internal: {fetchQuery: fetchQueryInternal},
   RelayFeatureFlags,
   areEqualSelectors,
   createOperationDescriptor,
@@ -117,7 +117,6 @@ function handlePotentialSnapshotErrorsForState(
       environment,
       state.snapshot.missingRequiredFields,
       state.snapshot.relayResolverErrors,
-      state.snapshot.errorResponseFields,
     );
   } else if (state.kind === 'plural') {
     for (const snapshot of state.snapshots) {
@@ -125,7 +124,6 @@ function handlePotentialSnapshotErrorsForState(
         environment,
         snapshot.missingRequiredFields,
         snapshot.relayResolverErrors,
-        snapshot.errorResponseFields,
       );
     }
   }
@@ -164,7 +162,6 @@ function handleMissedUpdates(
       selector: currentSnapshot.selector,
       missingRequiredFields: currentSnapshot.missingRequiredFields,
       relayResolverErrors: currentSnapshot.relayResolverErrors,
-      errorResponseFields: currentSnapshot.errorResponseFields,
     };
     return [
       updatedData !== state.snapshot.data,
@@ -190,7 +187,6 @@ function handleMissedUpdates(
         selector: currentSnapshot.selector,
         missingRequiredFields: currentSnapshot.missingRequiredFields,
         relayResolverErrors: currentSnapshot.relayResolverErrors,
-        errorResponseFields: currentSnapshot.errorResponseFields,
       };
       if (updatedData !== snapshot.data) {
         didMissUpdates = true;
@@ -218,7 +214,7 @@ function handleMissingClientEdge(
   parentFragmentRef: mixed,
   missingClientEdgeRequestInfo: MissingClientEdgeRequestInfo,
   queryOptions?: FragmentQueryOptions,
-): [QueryResult, ?Promise<mixed>] {
+): QueryResult {
   const originalVariables = getVariablesFromFragment(
     parentFragmentNode,
     parentFragmentRef,
@@ -237,23 +233,17 @@ function handleMissingClientEdge(
   // according to the component mount/suspense cycle; QueryResource
   // already handles this by itself.
   const QueryResource = getQueryResourceForEnvironment(environment);
-  const queryResult = QueryResource.prepare(
+  return QueryResource.prepare(
     queryOperationDescriptor,
     fetchQueryInternal(environment, queryOperationDescriptor),
     queryOptions?.fetchPolicy,
   );
-
-  return [
-    queryResult,
-    getPromiseForActiveRequest(environment, queryOperationDescriptor.request),
-  ];
 }
 
 function subscribeToSnapshot(
   environment: IEnvironment,
   state: FragmentState,
   setState: StateUpdaterFunction<FragmentState>,
-  hasPendingStateChanges: {current: boolean},
 ): () => void {
   if (state.kind === 'bailout') {
     return () => {};
@@ -274,14 +264,11 @@ function subscribeToSnapshot(
               name: 'useFragment.subscription.missedUpdates',
               hasDataChanges: dataChanged,
             });
-            hasPendingStateChanges.current = dataChanged;
             return dataChanged ? nextState : prevState;
           } else {
             return prevState;
           }
         }
-
-        hasPendingStateChanges.current = true;
         return {
           kind: 'singular',
           snapshot: latestSnapshot,
@@ -310,8 +297,6 @@ function subscribeToSnapshot(
                 name: 'useFragment.subscription.missedUpdates',
                 hasDataChanges: dataChanged,
               });
-              hasPendingStateChanges.current =
-                hasPendingStateChanges.current || dataChanged;
               return dataChanged ? nextState : prevState;
             } else {
               return prevState;
@@ -319,7 +304,6 @@ function subscribeToSnapshot(
           }
           const updated = [...prevState.snapshots];
           updated[index] = latestSnapshot;
-          hasPendingStateChanges.current = true;
           return {
             kind: 'plural',
             snapshots: updated,
@@ -360,11 +344,12 @@ function getFragmentState(
 }
 
 // fragmentNode cannot change during the lifetime of the component, though fragmentRef may change.
-function useFragmentInternal(
+function useFragmentInternal_REACT_CACHE(
   fragmentNode: ReaderFragment,
   fragmentRef: mixed,
   hookDisplayName: string,
   queryOptions?: FragmentQueryOptions,
+  fragmentKey?: string,
 ): ?SelectorData | Array<?SelectorData> {
   const fragmentSelector = useMemo(
     () => getSelector(fragmentNode, fragmentRef),
@@ -379,6 +364,7 @@ function useFragmentInternal(
       'Relay: Expected fragment pointer%s for fragment `%s` to be ' +
         'an array, instead got `%s`. Remove `@relay(plural: true)` ' +
         'from fragment `%s` to allow the prop to be an object.',
+      fragmentKey != null ? ` for key \`${fragmentKey}\`` : '',
       fragmentNode.name,
       typeof fragmentRef,
       fragmentNode.name,
@@ -389,6 +375,7 @@ function useFragmentInternal(
       'Relay: Expected fragment pointer%s for fragment `%s` not to be ' +
         'an array, instead got `%s`. Add `@relay(plural: true)` ' +
         'to fragment `%s` to allow the prop to be an array.',
+      fragmentKey != null ? ` for key \`${fragmentKey}\`` : '',
       fragmentNode.name,
       typeof fragmentRef,
       fragmentNode.name,
@@ -412,6 +399,7 @@ function useFragmentInternal(
     fragmentNode.name,
     hookDisplayName,
     fragmentNode.name,
+    fragmentKey == null ? 'a fragment reference' : `the \`${fragmentKey}\``,
     hookDisplayName,
   );
 
@@ -451,7 +439,7 @@ function useFragmentInternal(
   // The purpose of this is to detect whether we have ever committed, because we
   // don't suspend on store updates, only when the component either is first trying
   // to mount or when the our selector changes. The selector change in particular is
-  // how we suspend for pagination and refetch. Also, fragment selector can be null
+  // how we suspend for pagination and refetech. Also, fragment selector can be null
   // or undefined, so we use false as a special value to distinguish from all fragment
   // selectors; false means that the component hasn't mounted yet.
   const committedFragmentSelectorRef = useRef<false | ?ReaderSelector>(false);
@@ -466,33 +454,26 @@ function useFragmentInternal(
     // a static (constant) property of the fragment. In practice, this effect will
     // always or never run for a given invocation of this hook.
     // eslint-disable-next-line react-hooks/rules-of-hooks
-    const [clientEdgeQueries, activeRequestPromises] = useMemo(() => {
+    const clientEdgeQueries = useMemo(() => {
       const missingClientEdges = getMissingClientEdges(state);
       // eslint-disable-next-line no-shadow
       let clientEdgeQueries;
-      const activeRequestPromises = [];
       if (missingClientEdges?.length) {
         clientEdgeQueries = ([]: Array<QueryResult>);
         for (const edge of missingClientEdges) {
-          const [queryResult, requestPromise] = handleMissingClientEdge(
-            environment,
-            fragmentNode,
-            fragmentRef,
-            edge,
-            queryOptions,
+          clientEdgeQueries.push(
+            handleMissingClientEdge(
+              environment,
+              fragmentNode,
+              fragmentRef,
+              edge,
+              queryOptions,
+            ),
           );
-          clientEdgeQueries.push(queryResult);
-          if (requestPromise != null) {
-            activeRequestPromises.push(requestPromise);
-          }
         }
       }
-      return [clientEdgeQueries, activeRequestPromises];
+      return clientEdgeQueries;
     }, [state, environment, fragmentNode, fragmentRef, queryOptions]);
-
-    if (activeRequestPromises.length) {
-      throw Promise.all(activeRequestPromises);
-    }
 
     // See above note
     // eslint-disable-next-line react-hooks/rules-of-hooks
@@ -528,8 +509,6 @@ function useFragmentInternal(
     // We only suspend when the component is first trying to mount or changing
     // selectors, not if data becomes missing later:
     if (
-      RelayFeatureFlags.ENABLE_RELAY_OPERATION_TRACKER_SUSPENSE ||
-      environment !== previousEnvironment ||
       !committedFragmentSelectorRef.current ||
       !areEqualSelectors(committedFragmentSelectorRef.current, fragmentSelector)
     ) {
@@ -553,8 +532,6 @@ function useFragmentInternal(
   // they're missing even though we are out of options for possibly fetching them:
   handlePotentialSnapshotErrorsForState(environment, state);
 
-  const hasPendingStateChanges = useRef<boolean>(false);
-
   useEffect(() => {
     // Check for updates since the state was rendered
     let currentState = subscribedState;
@@ -573,29 +550,12 @@ function useFragmentInternal(
       }
       currentState = updatedState;
     }
-    return subscribeToSnapshot(
-      environment,
-      currentState,
-      setState,
-      hasPendingStateChanges,
-    );
+    return subscribeToSnapshot(environment, currentState, setState);
   }, [environment, subscribedState]);
-
-  if (hasPendingStateChanges.current) {
-    const updates = handleMissedUpdates(environment, state);
-    if (updates != null) {
-      const [hasStateUpdates, updatedState] = updates;
-      if (hasStateUpdates) {
-        setState(updatedState);
-        state = updatedState;
-      }
-    }
-    hasPendingStateChanges.current = false;
-  }
 
   let data: ?SelectorData | Array<?SelectorData>;
   if (isPlural) {
-    // Plural fragments require allocating an array of the snapshot data values,
+    // Plural fragments require allocating an array of the snasphot data values,
     // which has to be memoized to avoid triggering downstream re-renders.
     //
     // Note that isPlural is a constant property of the fragment and does not change
@@ -658,4 +618,4 @@ function useFragmentInternal(
   return data;
 }
 
-module.exports = useFragmentInternal;
+module.exports = useFragmentInternal_REACT_CACHE;

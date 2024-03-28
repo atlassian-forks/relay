@@ -13,10 +13,9 @@
 
 import type {Fragment, FragmentType, GraphQLTaggedNode} from 'relay-runtime';
 
-const HooksImplementation = require('./HooksImplementation');
-const {useTrackLoadQueryInRender} = require('./loadQuery');
-const useFragmentNode = require('./useFragmentNode');
-const useStaticFragmentNodeWarning = require('./useStaticFragmentNodeWarning');
+const {useTrackLoadQueryInRender} = require('../loadQuery');
+const useStaticFragmentNodeWarning = require('../useStaticFragmentNodeWarning');
+const useFragmentInternal = require('./useFragmentInternal_REACT_CACHE');
 const {useDebugValue} = require('react');
 const {getFragment} = require('relay-runtime');
 
@@ -43,31 +42,25 @@ declare function useFragment<TFragmentType: FragmentType, TData>(
   key: null | void,
 ): null | void;
 
-function useFragment_LEGACY(fragment: GraphQLTaggedNode, key: mixed): mixed {
+function useFragment(fragment: GraphQLTaggedNode, key: mixed): mixed {
   // We need to use this hook in order to be able to track if
   // loadQuery was called during render
   useTrackLoadQueryInRender();
 
   const fragmentNode = getFragment(fragment);
-  useStaticFragmentNodeWarning(fragmentNode, 'first argument of useFragment()');
-  const {data} = useFragmentNode<mixed>(fragmentNode, key, 'useFragment()');
+  if (__DEV__) {
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useStaticFragmentNodeWarning(
+      fragmentNode,
+      'first argument of useFragment()',
+    );
+  }
+  const data = useFragmentInternal(fragmentNode, key, 'useFragment()');
   if (__DEV__) {
     // eslint-disable-next-line react-hooks/rules-of-hooks
     useDebugValue({fragment: fragmentNode.name, data});
   }
   return data;
-}
-
-function useFragment(fragment: GraphQLTaggedNode, key: mixed): mixed {
-  const impl = HooksImplementation.get();
-  if (impl) {
-    // $FlowFixMe This is safe because impl.useFragment has the type of useFragment...
-    return impl.useFragment(fragment, key);
-    // (i.e. type declared above, but not the supertype used in this function definition)
-  } else {
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    return useFragment_LEGACY(fragment, key);
-  }
 }
 
 module.exports = useFragment;

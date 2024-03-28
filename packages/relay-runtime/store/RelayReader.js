@@ -33,7 +33,6 @@ import type {DataID, Variables} from '../util/RelayRuntimeTypes';
 import type {
   ClientEdgeTraversalInfo,
   DataIDSet,
-  ErrorResponseFields,
   MissingClientEdgeRequestInfo,
   MissingLiveResolverField,
   MissingRequiredFields,
@@ -117,7 +116,6 @@ class RelayReader {
   _missingLiveResolverFields: Array<MissingLiveResolverField>;
   _isWithinUnmatchedTypeRefinement: boolean;
   _missingRequiredFields: ?MissingRequiredFields;
-  _errorResponseFields: ?ErrorResponseFields;
   _owner: RequestDescriptor;
   _recordSource: RecordSource;
   _seenRecords: DataIDSet;
@@ -143,7 +141,6 @@ class RelayReader {
     this._isMissingData = false;
     this._isWithinUnmatchedTypeRefinement = false;
     this._missingRequiredFields = null;
-    this._errorResponseFields = null;
     this._owner = selector.owner;
     this._recordSource = recordSource;
     this._seenRecords = new Set();
@@ -229,31 +226,7 @@ class RelayReader {
       selector: this._selector,
       missingRequiredFields: this._missingRequiredFields,
       relayResolverErrors: this._resolverErrors,
-      errorResponseFields: this._errorResponseFields,
     };
-  }
-
-  _maybeAddErrorResponseFields(record: Record, storageKey: string): void {
-    if (!RelayFeatureFlags.ENABLE_FIELD_ERROR_HANDLING) {
-      return;
-    }
-    const errors = RelayModernRecord.getErrors(record, storageKey);
-
-    if (errors == null) {
-      return;
-    }
-    const owner = this._fragmentName;
-
-    if (this._errorResponseFields == null) {
-      this._errorResponseFields = [];
-    }
-    for (const error of errors) {
-      this._errorResponseFields.push({
-        owner,
-        path: (error.path ?? []).join('.'),
-        error,
-      });
-    }
   }
 
   _markDataAsMissing(): void {
@@ -283,7 +256,6 @@ class RelayReader {
   ): ?SelectorData {
     const record = this._recordSource.get(dataID);
     this._seenRecords.add(dataID);
-
     if (record == null) {
       if (record === undefined) {
         this._markDataAsMissing();
@@ -540,19 +512,8 @@ class RelayReader {
     record: Record,
     data: SelectorData,
   ): mixed {
-    const parentRecordID = RelayModernRecord.getDataID(record);
-    const result = this._readResolverFieldImpl(field, parentRecordID);
-
-    const applicationName = field.alias ?? field.name;
-    data[applicationName] = result;
-    return result;
-  }
-
-  _readResolverFieldImpl(
-    field: ReaderRelayResolver | ReaderRelayLiveResolver,
-    parentRecordID: DataID,
-  ): mixed {
     const {fragment} = field;
+    const parentRecordID = RelayModernRecord.getDataID(record);
 
     // Found when reading the resolver fragment, which can happen either when
     // evaluating the resolver and it calls readFragment, or when checking if the
@@ -652,6 +613,8 @@ class RelayReader {
       updatedDataIDs,
     );
 
+    const applicationName = field.alias ?? field.name;
+    data[applicationName] = result;
     return result;
   }
 
@@ -768,29 +731,10 @@ class RelayReader {
           validClientEdgeResolverResponse.ids,
           this._resolverCache,
         );
-        let validStoreIDs: $ReadOnlyArray<?DataID> = storeIDs;
-        if (field.modelResolvers != null) {
-          invariant(
-            field.concreteType != null,
-            'concreteType should not be null',
-          );
-          const modelResolver = field.modelResolvers[field.concreteType];
-          invariant(
-            modelResolver !== undefined,
-            'modelResolver should not be undefined',
-          );
-          validStoreIDs = storeIDs.map(storeID => {
-            const model = this._readResolverFieldImpl(
-              modelResolver, // TODO: Pick correct model resolver for this edge
-              storeID,
-            );
-            return model != null ? storeID : null;
-          });
-        }
         this._clientEdgeTraversalPath.push(null);
         const edgeValues = this._readLinkedIds(
           field.linkedField,
-          validStoreIDs,
+          storeIDs,
           record,
           data,
         );
@@ -805,25 +749,6 @@ class RelayReader {
             validClientEdgeResolverResponse.id,
             this._resolverCache,
           );
-        if (field.modelResolvers != null) {
-          invariant(
-            field.concreteType != null,
-            'concreteType should not be null',
-          );
-          const modelResolver = field.modelResolvers[field.concreteType];
-          invariant(
-            modelResolver !== undefined,
-            'modelResolver should not be undefined',
-          );
-          // TODO: Pick correct model resolver for this edge
-          const model = this._readResolverFieldImpl(modelResolver, storeID);
-          if (model == null) {
-            // If the model resolver returns undefined, we should still return null
-            // to match GQL behavior.
-            data[applicationName] = null;
-            return null;
-          }
-        }
         this._clientEdgeTraversalPath.push(traversalPathSegment);
 
         const prevData = data[applicationName];
@@ -857,9 +782,7 @@ class RelayReader {
     const applicationName = field.alias ?? field.name;
     const storageKey = getStorageKey(field, this._variables);
     const value = RelayModernRecord.getValue(record, storageKey);
-    if (value === null) {
-      this._maybeAddErrorResponseFields(record, storageKey);
-    } else if (value === undefined) {
+    if (value === undefined) {
       this._markDataAsMissing();
     }
     data[applicationName] = value;
@@ -876,9 +799,7 @@ class RelayReader {
     const linkedID = RelayModernRecord.getLinkedRecordID(record, storageKey);
     if (linkedID == null) {
       data[applicationName] = linkedID;
-      if (linkedID === null) {
-        this._maybeAddErrorResponseFields(record, storageKey);
-      } else if (linkedID === undefined) {
+      if (linkedID === undefined) {
         this._markDataAsMissing();
       }
       return linkedID;
@@ -915,8 +836,6 @@ class RelayReader {
       data[applicationName] = externalRef;
       if (externalRef === undefined) {
         this._markDataAsMissing();
-      } else if (externalRef === null) {
-        this._maybeAddErrorResponseFields(record, storageKey);
       }
       return data[applicationName];
     }
@@ -944,9 +863,6 @@ class RelayReader {
   ): ?mixed {
     const storageKey = getStorageKey(field, this._variables);
     const linkedIDs = RelayModernRecord.getLinkedRecordIDs(record, storageKey);
-    if (linkedIDs === null) {
-      this._maybeAddErrorResponseFields(record, storageKey);
-    }
     return this._readLinkedIds(field, linkedIDs, record, data);
   }
 

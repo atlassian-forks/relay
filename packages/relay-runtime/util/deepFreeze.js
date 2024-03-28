@@ -36,12 +36,17 @@ function deepFreeze<T: {...}>(object: T): T {
 }
 
 function shouldBeFrozen(value: mixed): boolean {
-  // Only freeze plain JS arrays and objects
-  return (
-    value != null &&
-    (Array.isArray(value) ||
-      (typeof value === 'object' && value.constructor === Object))
-  );
+  // Primitives and functions:
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+
+  // Views on array buffers cannot be frozen
+  if (ArrayBuffer.isView(value)) {
+    return false;
+  }
+
+  return true;
 }
 
 module.exports = deepFreeze;

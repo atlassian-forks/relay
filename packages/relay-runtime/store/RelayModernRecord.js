@@ -13,7 +13,6 @@
 
 import type {ActorIdentifier} from '../multi-actor-environment/ActorIdentifier';
 import type {DataID} from '../util/RelayRuntimeTypes';
-import type {TRelayFieldError} from './RelayErrorTrie';
 
 const deepFreeze = require('../util/deepFreeze');
 const {generateClientObjectClientID, isClientID} = require('./ClientID');
@@ -22,7 +21,6 @@ const {
 } = require('./experimental-live-resolvers/LiveResolverSuspenseSentinel');
 const {
   ACTOR_IDENTIFIER_KEY,
-  ERRORS_KEY,
   ID_KEY,
   INVALIDATED_AT_KEY,
   REF_KEY,
@@ -35,16 +33,9 @@ const areEqual = require('areEqual');
 const invariant = require('invariant');
 const warning = require('warning');
 
-type StorageKey = Exclude<string, typeof ERRORS_KEY>;
-
-type RelayFieldErrors = {[StorageKey]: $ReadOnlyArray<TRelayFieldError>};
+type StorageKey = string;
 
 export type RecordJSON = {
-  /**
-   * We cannot replace __errors with typeof ERRORS_KEY because Flow does
-   * not support types with multiple indexers.
-   */
-  __errors?: RelayFieldErrors,
   [StorageKey]: mixed,
   ...
 };
@@ -168,9 +159,6 @@ function getDataID(record: Record): DataID {
  * Get the fields of a record.
  */
 function getFields(record: Record): Array<StorageKey> {
-  if (ERRORS_KEY in record) {
-    return Object.keys(record).filter(field => field !== ERRORS_KEY);
-  }
   return Object.keys(record);
 }
 
@@ -181,18 +169,6 @@ function getFields(record: Record): Array<StorageKey> {
  */
 function getType(record: Record): string {
   return (record[TYPENAME_KEY]: any);
-}
-
-/**
- * @public
- *
- * Get the errors associated with particular field.
- */
-function getErrors(
-  record: Record,
-  storageKey: StorageKey,
-): $ReadOnlyArray<TRelayFieldError> | void {
-  return record[ERRORS_KEY]?.[storageKey];
 }
 
 /**
@@ -259,20 +235,6 @@ function getLinkedRecordID(record: Record, storageKey: StorageKey): ?DataID {
 /**
  * @public
  *
- * Checks if a field has a reference to another record.
- */
-function hasLinkedRecordID(record: Record, storageKey: StorageKey): boolean {
-  const maybeLink = record[storageKey];
-  if (maybeLink == null) {
-    return false;
-  }
-  const link = maybeLink;
-  return typeof link === 'object' && link && typeof link[REF_KEY] === 'string';
-}
-
-/**
- * @public
- *
  * Get the value of a field as a list of references to other records. Throws if
  * the field has a different type.
  */
@@ -298,23 +260,6 @@ function getLinkedRecordIDs(
   );
   // assume items of the array are ids
   return (links[REFS_KEY]: any);
-}
-
-/**
- * @public
- *
- * Checks if a field have references to other records.
- */
-function hasLinkedRecordIDs(record: Record, storageKey: StorageKey): boolean {
-  const links = record[storageKey];
-  if (links == null) {
-    return false;
-  }
-  return (
-    typeof links === 'object' &&
-    Array.isArray(links[REFS_KEY]) &&
-    links[REFS_KEY].every(link => typeof link === 'string')
-  );
 }
 
 /**
@@ -369,43 +314,16 @@ function update(prevRecord: Record, nextRecord: Record): Record {
       nextType,
     );
   }
-  const prevErrorsByKey = prevRecord[ERRORS_KEY];
-  const nextErrorsByKey = nextRecord[ERRORS_KEY];
   let updated: Record | null = null;
-  if (prevErrorsByKey == null && nextErrorsByKey == null) {
-    for (const storageKey in nextRecord) {
-      if (
-        updated ||
-        !areEqual(prevRecord[storageKey], nextRecord[storageKey])
-      ) {
-        updated = updated !== null ? updated : {...prevRecord};
-        updated[storageKey] = nextRecord[storageKey];
-      }
+  const keys = Object.keys(nextRecord);
+  for (let ii = 0; ii < keys.length; ii++) {
+    const key = keys[ii];
+    if (updated || !areEqual(prevRecord[key], nextRecord[key])) {
+      updated = updated !== null ? updated : {...prevRecord};
+      updated[key] = nextRecord[key];
     }
-    return updated ?? prevRecord;
   }
-  for (const storageKey in nextRecord) {
-    if (storageKey === ERRORS_KEY) {
-      continue;
-    }
-    const nextValue = nextRecord[storageKey];
-    const nextErrors = nextErrorsByKey?.[storageKey];
-    if (updated == null) {
-      const prevValue = prevRecord[storageKey];
-      const prevErrors = prevErrorsByKey?.[storageKey];
-      if (areEqual(prevValue, nextValue) && areEqual(prevErrors, nextErrors)) {
-        continue;
-      }
-      updated = {...prevRecord};
-      if (prevErrorsByKey != null) {
-        // Make a copy of prevErrorsByKey so that our changes don't affect prevRecord
-        updated[ERRORS_KEY] = {...prevErrorsByKey};
-      }
-    }
-    setValue(updated, storageKey, nextValue);
-    setErrors(updated, storageKey, nextErrors);
-  }
-  return updated ?? prevRecord;
+  return updated !== null ? updated : prevRecord;
 }
 
 /**
@@ -440,34 +358,7 @@ function merge(record1: Record, record2: Record): Record {
       nextType,
     );
   }
-  if (ERRORS_KEY in record1 || ERRORS_KEY in record2) {
-    const {[ERRORS_KEY]: errors1, ...fields1} = record1;
-    const {[ERRORS_KEY]: errors2, ...fields2} = record2;
-    // $FlowIssue[cannot-spread-indexer]
-    const updated: Record = {...fields1, ...fields2};
-    if (errors1 == null && errors2 == null) {
-      return updated;
-    }
-    const updatedErrors: RelayFieldErrors = {};
-    for (const storageKey in errors1) {
-      if (fields2.hasOwnProperty(storageKey)) {
-        continue;
-      }
-      updatedErrors[storageKey] = errors1[storageKey];
-    }
-    for (const storageKey in errors2) {
-      updatedErrors[storageKey] = errors2[storageKey];
-    }
-    for (const _storageKey in updatedErrors) {
-      // We only need to add updatedErrors to updated if there was one or more error
-      updated[ERRORS_KEY] = updatedErrors;
-      break;
-    }
-    return updated;
-  } else {
-    // $FlowIssue[cannot-spread-indexer]
-    return {...record1, ...record2};
-  }
+  return {...record1, ...record2};
 }
 
 /**
@@ -478,44 +369,6 @@ function merge(record1: Record, record2: Record): Record {
  */
 function freeze(record: Record): void {
   deepFreeze(record);
-}
-
-/**
- * @public
- *
- * Set the errors associated with a particular field.
- */
-function setErrors(
-  record: Record,
-  storageKey: StorageKey,
-  errors?: $ReadOnlyArray<TRelayFieldError>,
-): void {
-  if (__DEV__) {
-    warning(
-      storageKey in record,
-      'RelayModernRecord: Invalid error update, `%s` should not be undefined.',
-      storageKey,
-    );
-  }
-  const errorsByStorageKey = record[ERRORS_KEY];
-  if (errors != null && errors.length > 0) {
-    if (errorsByStorageKey == null) {
-      record[ERRORS_KEY] = {[storageKey]: errors};
-    } else {
-      errorsByStorageKey[storageKey] = errors;
-    }
-  } else if (errorsByStorageKey != null) {
-    if (delete errorsByStorageKey[storageKey]) {
-      for (const otherStorageKey in errorsByStorageKey) {
-        if (errorsByStorageKey.hasOwnProperty(otherStorageKey)) {
-          // That wasn't the last error, so we shouldn't remove the error map
-          return;
-        }
-      }
-      // That was the last error, so we should remove the error map
-      delete record[ERRORS_KEY];
-    }
-  }
 }
 
 /**
@@ -700,7 +553,6 @@ module.exports = {
   freeze,
   fromObject,
   getDataID,
-  getErrors,
   getFields,
   getInvalidationEpoch,
   getLinkedRecordID,
@@ -708,10 +560,7 @@ module.exports = {
   getType,
   getValue,
   hasValue,
-  hasLinkedRecordID,
-  hasLinkedRecordIDs,
   merge,
-  setErrors,
   setValue,
   setLinkedRecordID,
   setLinkedRecordIDs,

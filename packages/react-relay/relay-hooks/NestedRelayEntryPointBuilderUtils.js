@@ -24,14 +24,20 @@ import type {
  * We make the type of `ThinNestedEntryPointParams` opaque, so that the only way
  * to construct a `ThinNestedEntryPointParams` is by calling this function.
  */
-declare function NestedRelayEntryPoint<TEntryPointParams>(
+declare function NestedRelayEntryPoint<
+  TEntryPointParams,
+  TPreloadedQueries,
+  TPreloadedEntryPoints,
+  TRuntimeProps,
+  TExtraProps,
+>(
   $ReadOnly<{
     entryPoint: InternalEntryPointRepresentation<
       TEntryPointParams,
-      $FlowFixMe,
-      $FlowFixMe,
-      $FlowFixMe,
-      $FlowFixMe,
+      TPreloadedQueries,
+      TPreloadedEntryPoints,
+      TRuntimeProps,
+      TExtraProps,
     >,
     entryPointParams: TEntryPointParams,
   }>,

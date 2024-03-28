@@ -268,7 +268,7 @@ export class GraphModeNormalizer {
       switch (selection.kind) {
         case LINKED_FIELD: {
           const responseKey = selection.alias ?? selection.name;
-          const fieldData: PayloadData = (data[responseKey]: any);
+          const fieldData = ((data[responseKey]: any): PayloadData);
 
           const storageKey = this._getStorageKey(selection);
 
@@ -306,7 +306,7 @@ export class GraphModeNormalizer {
             this.duplicateFieldsAvoided++;
             break;
           }
-          const fieldData: ChunkField = (data[responseKey]: any);
+          const fieldData = ((data[responseKey]: any): ChunkField);
 
           parentFields[storageKey] = fieldData;
           sentFields.add(storageKey);

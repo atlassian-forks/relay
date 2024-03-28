@@ -74,7 +74,7 @@ export type ClientRequestParameters = {
   +text: null,
   // common fields
   +name: string,
-  +operationKind: 'query' | 'mutation',
+  +operationKind: 'query',
   +providedVariables?: ProvidedVariablesType,
   +metadata: {[key: string]: mixed, ...},
 };

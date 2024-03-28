@@ -11,6 +11,7 @@
 
 'use strict';
 
+import type {RefetchableIdentifierInfo} from '../../relay-runtime/util/ReaderNode';
 import type {LoaderFn} from './useQueryLoader';
 import type {
   ConcreteRequest,
@@ -20,16 +21,15 @@ import type {
   OperationDescriptor,
   OperationType,
   ReaderFragment,
-  RefetchableIdentifierInfo,
   RenderPolicy,
   Variables,
   VariablesOf,
 } from 'relay-runtime';
 
+const {getFragmentResourceForEnvironment} = require('./FragmentResource');
 const ProfilerContext = require('./ProfilerContext');
 const {getQueryResourceForEnvironment} = require('./QueryResource');
-const readFragmentInternal = require('./readFragmentInternal');
-const useFragmentInternal = require('./useFragmentInternal');
+const useFragmentNode = require('./useFragmentNode');
 const useIsMountedRef = require('./useIsMountedRef');
 const useQueryLoader = require('./useQueryLoader');
 const useRelayEnvironment = require('./useRelayEnvironment');
@@ -55,13 +55,16 @@ export type RefetchFn<
 //    /nullable/.
 //  - Or, expects /a subset/ of the query variables if the provided key type is
 //    /non-null/.
+// prettier-ignore
 export type RefetchFnDynamic<
   TQuery: OperationType,
-  TKey: ?{+$data?: mixed, ...},
+  TKey: ?{ +$data?: mixed, ... },
   TOptions = Options,
-> = [TKey] extends [{+$data?: mixed, ...}]
-  ? RefetchFnInexact<TQuery, TOptions>
-  : RefetchFnExact<TQuery, TOptions>;
+> = $Call<
+  & (( { +$data?: mixed, ... }) => RefetchFnInexact<TQuery, TOptions>)
+  & ((?{ +$data?: mixed, ... }) => RefetchFnExact<TQuery, TOptions>),
+  TKey
+>;
 
 export type ReturnType<
   TQuery: OperationType,
@@ -71,6 +74,8 @@ export type ReturnType<
   fragmentData: mixed,
   fragmentRef: mixed,
   refetch: RefetchFnDynamic<TQuery, TKey, TOptions>,
+  disableStoreUpdates: () => void,
+  enableStoreUpdates: () => void,
 };
 
 export type Options = {
@@ -96,7 +101,7 @@ type RefetchFnExact<TQuery: OperationType, TOptions = Options> = RefetchFnBase<
 type RefetchFnInexact<
   TQuery: OperationType,
   TOptions = Options,
-> = RefetchFnBase<$ReadOnly<Partial<VariablesOf<TQuery>>>, TOptions>;
+> = RefetchFnBase<Partial<VariablesOf<TQuery>>, TOptions>;
 
 type Action =
   | {
@@ -169,8 +174,10 @@ function useRefetchableFragmentNode<
   componentDisplayName: string,
 ): ReturnType<TQuery, TKey, InternalOptions> {
   const parentEnvironment = useRelayEnvironment();
-  const {refetchableRequest, fragmentRefPathInResponse, identifierInfo} =
-    getRefetchMetadata(fragmentNode, componentDisplayName);
+  const {refetchableRequest, fragmentRefPathInResponse} = getRefetchMetadata(
+    fragmentNode,
+    componentDisplayName,
+  );
   const fragmentIdentifier = getFragmentIdentifier(
     fragmentNode,
     parentFragmentRef,
@@ -197,6 +204,7 @@ function useRefetchableFragmentNode<
   const environment = refetchEnvironment ?? parentEnvironment;
 
   const QueryResource = getQueryResourceForEnvironment(environment);
+  const FragmentResource = getFragmentResourceForEnvironment(environment);
   const profilerContext = useContext(ProfilerContext);
 
   const shouldReset =
@@ -209,6 +217,12 @@ function useRefetchableFragmentNode<
   >((refetchableRequest: $FlowFixMe));
 
   let fragmentRef = parentFragmentRef;
+
+  const {identifierInfo} = getRefetchMetadata(
+    fragmentNode,
+    componentDisplayName,
+  );
+
   if (shouldReset) {
     dispatch({
       type: 'reset',
@@ -288,8 +302,7 @@ function useRefetchableFragmentNode<
       );
     });
 
-    const queryData = readFragmentInternal(
-      environment,
+    const queryData = FragmentResource.read(
       queryResult.fragmentNode,
       queryResult.fragmentRef,
       componentDisplayName,
@@ -328,11 +341,11 @@ function useRefetchableFragmentNode<
   // If refetch was called, we read the fragment using the new computed
   // fragment ref from the refetch query response; otherwise, we use the
   // fragment ref passed by the caller as normal.
-  const fragmentData = useFragmentInternal(
-    fragmentNode,
-    fragmentRef,
-    componentDisplayName,
-  );
+  const {
+    data: fragmentData,
+    disableStoreUpdates,
+    enableStoreUpdates,
+  } = useFragmentNode<mixed>(fragmentNode, fragmentRef, componentDisplayName);
 
   const refetch = useRefetchFunction<TQuery>(
     componentDisplayName,
@@ -350,8 +363,9 @@ function useRefetchableFragmentNode<
   return {
     fragmentData,
     fragmentRef,
-    // $FlowFixMe[incompatible-return] RefetchFn not compatible with RefetchFnDynamic
     refetch,
+    disableStoreUpdates,
+    enableStoreUpdates,
   };
 }
 
@@ -479,13 +493,11 @@ function useRefetchFunction<TQuery: OperationType>(
       const refetchQuery = createOperationDescriptor(
         refetchableRequest,
         refetchVariables,
-        {
-          force: true,
-        },
+        {force: true},
       );
 
       // We call loadQuery which will start a network request if necessary
-      // and update the queryRef from useQueryLoader.
+      // and update the querRef from useQueryLoader.
       // Note the following:
       // - loadQuery will dispose of any previously refetched queries.
       // - We use the variables extracted off the OperationDescriptor

@@ -11,14 +11,14 @@
 
 'use strict';
 
-import type {RelayFieldLogger} from './RelayStoreTypes';
+import type {RequiredFieldLogger} from './RelayStoreTypes';
 
-const defaultRelayFieldLogger: RelayFieldLogger = event => {
+const defaultRequiredFieldLogger: RequiredFieldLogger = event => {
   if (__DEV__ && event.kind === 'missing_field.log') {
     throw new Error(
-      'Relay Environment Configuration Error (dev only): `@required(action: LOG)` requires that the Relay Environment be configured with a `relayFieldLogger`.',
+      'Relay Environment Configuration Error (dev only): `@required(action: LOG)` requires that the Relay Environment be configured with a `requiredFieldLogger`.',
     );
   }
 };
 
-module.exports = defaultRelayFieldLogger;
+module.exports = defaultRequiredFieldLogger;
