@@ -2323,6 +2323,8 @@ impl<'schema, 'builder, 'config> CodegenBuilder<'schema, 'builder, 'config> {
                 let provider_module =
                     if matches!(self.project_config.js_module_format, JsModuleFormat::Haste) {
                         provider.module_name
+                    } else if provider.module_name.lookup().starts_with("@") {
+                        provider.module_name
                     } else {
                         // This will build a path from the operation artifact to the provider module
                         self.project_config.js_module_import_identifier(

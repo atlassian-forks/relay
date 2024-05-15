@@ -691,7 +691,6 @@ pub fn get_module_path(js_module_format: JsModuleFormat, key: StringKey) -> Cow<
         JsModuleFormat::CommonJS => {
             let path = Path::new(key.lookup());
             let extension = path.extension();
-
             if let Some(extension) = extension {
                 if extension == "ts" || extension == "tsx" || extension == "js" {
                     let path_without_extension = path.with_extension("");
@@ -699,11 +698,18 @@ pub fn get_module_path(js_module_format: JsModuleFormat, key: StringKey) -> Cow<
                     let path_without_extension = path_without_extension
                         .to_str()
                         .expect("could not convert `path_without_extension` to a str");
-
-                    return Cow::Owned(format!("./{}", path_without_extension));
+                    if path_without_extension.starts_with("@") {
+                        return Cow::Owned(format!("{}", path_without_extension));
+                    } else {
+                        return Cow::Owned(format!("./{}", path_without_extension));
+                    }
                 }
             }
-            Cow::Owned(format!("./{}", key.borrow()))
+            if key.borrow().to_string().starts_with("@") {
+                Cow::Owned(format!("{}", key.borrow()))
+            } else {
+                Cow::Owned(format!("./{}", key.borrow()))
+            }
         }
         JsModuleFormat::Haste => Cow::Borrowed(key.lookup()),
     }
