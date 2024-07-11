@@ -20,6 +20,7 @@ use super::CATCH_DIRECTIVE_NAME;
 use super::TO_ARGUMENT;
 use crate::CatchTo;
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub struct CatchMetadata {
     pub to: CatchTo,
