@@ -222,12 +222,16 @@ jobs:
           path: compiler/target/${{ matrix.target.target }}/release/${{ matrix.target.build-name }}
 
   main-release:
-    name: Publish to NPM
+    name: Publish build artifacts
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.repository == 'atlassian-forks/relay'
     needs: [js-tests, js-lint, typecheck, build-tests, build-compiler]
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: true
       - uses: actions/setup-node@v6
         with:
           node-version: 20.x
@@ -278,13 +282,25 @@ jobs:
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
         run: yarn gulp release
 
-      - name: Publish to npm
-        if: github.ref == 'refs/heads/main-atl' || github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+      # TODO: Uncomment this when we have a way to publish to npm
+      # - name: Publish to npm
+      #   if: github.ref == 'refs/heads/main-atl' || github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+      #   run: |
+      #     for pkg in dist/*; do
+      #       npm publish "./$pkg" ${TAG}
+      #     done
+      #   env:
+      #     TAG: ${{ github.ref == 'refs/heads/main-atl' && '--tag=main-atl' || ((contains(github.ref_name, '-rc.') && '--tag=dev') || '' )}}
+      #     NPM_REGISTRY: ${{ secrets.REGISTRY }}
+      #     NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
+
+      - name: Push relay-compiler package to branch
+        if: github.ref == 'refs/heads/main-atl'
         run: |
-          for pkg in dist/*; do
-            npm publish "./$pkg" ${TAG}
-          done
-        env:
-          TAG: ${{ github.ref == 'refs/heads/main-atl' && '--tag=main-atl' || ((contains(github.ref_name, '-rc.') && '--tag=dev') || '' )}}
-          NPM_REGISTRY: ${{ secrets.REGISTRY }}
-          NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
+          mkdir -p build-packages
+          cp -r dist/relay-compiler build-packages/
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add build-packages/
+          git diff --staged --quiet || git commit -m "chore: update build-packages/relay-compiler [skip ci]"
+          git push origin HEAD:${{ github.ref }}
