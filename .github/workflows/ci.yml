@@ -273,7 +273,8 @@ jobs:
           chmod +x macos-arm64/relay
 
       - name: Build latest (main) version
-        if: github.ref == 'refs/heads/main-atl'
+        # Run on any branch (for testing) and main-atl. For prod-only: if: github.ref == 'refs/heads/main-atl'
+        if: github.ref_type == 'branch'
         run: yarn gulp mainrelease
         env:
           RELEASE_COMMIT_SHA: ${{ github.sha }}
@@ -295,7 +296,8 @@ jobs:
       #     NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
 
       - name: Push relay-compiler package to branch
-        if: github.ref == 'refs/heads/main-atl'
+        # Run on any branch (for testing). For prod-only: if: github.ref == 'refs/heads/main-atl'
+        if: github.ref_type == 'branch'
         run: |
           mkdir -p build-packages
           cp -r dist/relay-compiler build-packages/
