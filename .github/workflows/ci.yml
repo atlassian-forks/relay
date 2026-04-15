@@ -302,9 +302,14 @@ jobs:
         if: github.ref == 'refs/heads/release' || github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
         run: |
           for pkg in dist/*; do
-            npm publish "./$pkg" ${TAG} --userconfig=./.npmrc-public --@atlassian:registry="https://packages.atlassian.com/api/npm/npm-public/"
+            pkgName=$(jq -r '.name' "$pkg/package.json")
+            if [[ $pkgName == @atlassian/* ]]; then
+              npm publish "./$pkg" ${TAG} --userconfig=./.npmrc-public --@atlassian:registry="https://packages.atlassian.com/api/npm/npm-public/"
+            else
+              echo "Skipping $pkgName (not @atlassian scoped)"
+            fi
           done
         env:
           TAG: ${{ github.ref == 'refs/heads/release' && '--tag=main-atl' || ((contains(github.ref_name, '-rc.') && '--tag=dev') || '' )}}
-          NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
+          # NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
           NPM_REGISTRY: ${{ secrets.REGISTRY }}
