@@ -306,4 +306,5 @@ jobs:
           done
         env:
           TAG: ${{ github.ref == 'refs/heads/release' && '--tag=main-atl' || ((contains(github.ref_name, '-rc.') && '--tag=dev') || '' )}}
+          NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
           NPM_REGISTRY: ${{ secrets.REGISTRY }}
