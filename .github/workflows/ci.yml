@@ -238,13 +238,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh pr create \
-            --base release \
-            --head main-atl \
-            --title "[Main release] Merge to trigger Artifactory publish to NPM (main-atl → release)" \
-            --body "This PR was automatically created by CI when a push was made to \`main-atl\`. Merging this PR will trigger the \`main-release\` job and publish to Artifactory." \
-            --label release \
-          || echo "PR already exists, skipping creation"
+          if gh pr list --base release --head main-atl --state open --json number --jq '.[0].number' | grep -q '^[0-9]'; then
+            echo "PR already exists, skipping creation"
+          else
+            gh pr create \
+              --base release \
+              --head main-atl \
+              --title "[Main release] Merge to trigger Artifactory publish to NPM (main-atl → release)" \
+              --body "This PR was automatically created by CI when a push was made to \`main-atl\`. Merging this PR will trigger the \`main-release\` job and publish to Artifactory."
+          fi
 
   main-release:
     name: Publish release branch to Artifactory
