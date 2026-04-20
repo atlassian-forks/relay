@@ -229,6 +229,7 @@ jobs:
     name: Create release publishing PR
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main-atl' && github.event_name == 'push' && github.repository == 'atlassian-forks/relay'
+    needs: [js-tests, js-lint, typecheck, build-tests, build-compiler]
     permissions:
       contents: read
       pull-requests: write
@@ -255,7 +256,7 @@ jobs:
     needs: [js-tests, js-lint, typecheck, build-tests, build-compiler]
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare dependencies
+      - name: Setup publishing environment
         uses: ./.github/actions/setup-publishing-environment
 
       - name: Build latest release version
@@ -282,7 +283,7 @@ jobs:
     needs: [js-tests, js-lint, typecheck, build-tests, build-compiler]
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare dependencies
+      - name: Setup publishing environment
         uses: ./.github/actions/setup-publishing-environment
 
       - name: Build release version
