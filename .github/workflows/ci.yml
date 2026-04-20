@@ -254,6 +254,7 @@ jobs:
     if:  github.ref == 'refs/heads/release' && github.event_name == 'push' && github.repository == 'atlassian-forks/relay'
     needs: [js-tests, js-lint, typecheck, build-tests, build-compiler]
     steps:
+      - uses: actions/checkout@v6
       - name: Prepare dependencies
         uses: ./.github/actions/setup-publishing-environment
 
@@ -280,6 +281,7 @@ jobs:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && github.event_name == 'push' && github.repository == 'atlassian-forks/relay'
     needs: [js-tests, js-lint, typecheck, build-tests, build-compiler]
     steps:
+      - uses: actions/checkout@v6
       - name: Prepare dependencies
         uses: ./.github/actions/setup-publishing-environment
 
