@@ -226,7 +226,7 @@ jobs:
           path: compiler/target/${{ matrix.target.target }}/release/${{ matrix.target.build-name }}
 
   create-release-pr:
-    name: Create PR to release branch for Artifactory publish
+    name: Create release publishing PR
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main-atl' && github.event_name == 'push' && github.repository == 'atlassian-forks/relay'
     permissions:
