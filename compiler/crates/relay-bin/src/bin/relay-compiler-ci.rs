@@ -171,11 +171,14 @@ fn paths(bytes: Vec<u8>) -> Result<Vec<String>> {
         .filter(|s| !s.is_empty())
         .map(|s| {
             let path = Path::new(s);
-            if path.is_absolute()
-                || path
-                    .components()
-                    .any(|part| matches!(part, std::path::Component::ParentDir))
-            {
+            if path.components().any(|part| {
+                matches!(
+                    part,
+                    std::path::Component::Prefix(_)
+                        | std::path::Component::RootDir
+                        | std::path::Component::ParentDir
+                )
+            }) {
                 Err(format!("Unsafe Git delta path: {s}").into())
             } else {
                 Ok(s.to_owned())
@@ -707,6 +710,11 @@ mod tests {
         assert!(paths(b"/absolute.ts\0".to_vec()).is_err());
         assert!(paths(b"src/../escape.ts\0".to_vec()).is_err());
         assert!(paths(vec![255, 0]).is_err());
+        #[cfg(windows)]
+        {
+            assert!(paths(b"C:relative.ts\0".to_vec()).is_err());
+            assert!(paths(b"C:/absolute.ts\0".to_vec()).is_err());
+        }
     }
 
     #[test]
