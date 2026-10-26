@@ -26,6 +26,3 @@ schema-documentation = { path = "../schema-documentation" }
 simplelog = "0.12.2"
 thiserror = "2.0.12"
 tokio = { version = "1.47.1", features = ["full", "test-util", "tracing"] }
-
-[dev-dependencies]
-graphql-test-helpers = { path = "../graphql-test-helpers" }

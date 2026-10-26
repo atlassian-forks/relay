@@ -31,7 +31,6 @@ pub struct WalkDirFileSourceResult {
 pub struct WalkDirFileSource {
     pub config: Arc<Config>,
     expected_file_extensions: HashSet<&'static str>,
-    output_dirs: Vec<PathBuf>,
 }
 
 fn get_expected_file_extensions(config: &Config) -> HashSet<&'static str> {
@@ -62,22 +61,13 @@ impl WalkDirFileSource {
             "Watchman server is disabled, or not available. Using GlobFileSource to find files."
         );
         let expected_file_extensions = get_expected_file_extensions(&config);
-        let output_dirs = config.get_output_dir_paths();
         Self {
             config,
             expected_file_extensions,
-            output_dirs,
         }
     }
 
     fn should_include_file(&self, name: &Path) -> bool {
-        // Like Watchman, include every file in explicitly configured output
-        // directories. Extra artifacts (e.g. persisted mock JSON) need to be
-        // discovered even when they don't have a source file extension, so
-        // obsolete artifacts can be deleted or reported by --validate.
-        if self.output_dirs.iter().any(|dir| name.starts_with(dir)) {
-            return true;
-        }
         matches!(
             name.extension().map(|extension| self
                 .expected_file_extensions
@@ -94,9 +84,6 @@ impl WalkDirFileSource {
             .flat_map(WalkDir::new)
             .filter_map(|entry| {
                 let dir_entry = entry.ok()?;
-                if !dir_entry.file_type().is_file() {
-                    return None;
-                }
                 let relative_path = dir_entry
                     .path()
                     .strip_prefix(self.config.root_dir.clone())
@@ -129,73 +116,5 @@ impl WalkDirFileSource {
         setup_event.complete();
 
         Ok(compiler_state)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use graphql_test_helpers::TestDir;
-
-    use super::*;
-
-    #[test]
-    fn discovers_output_files_regardless_of_extension() {
-        let test_dir = TestDir::new();
-        let mut config = Config::from_string_for_test(
-            r#"{
-                "sources": {"src": "test"},
-                "projects": {
-                    "test": {
-                        "schema": "schema.graphql",
-                        "language": "typescript",
-                        "output": "artifacts",
-                        "extraArtifactsOutput": "src/mocks"
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-        config.root_dir = test_dir.path().to_path_buf();
-
-        for file in [
-            "schema.graphql",
-            "src/Example.ts",
-            "src/unrelated.json",
-            "src/mocks-sibling/unrelated.json",
-            "src/mocks/ExampleQuery.json",
-            "src/mocks/nested/metadata",
-            "artifacts/ExampleQuery.graphql.ts",
-            "artifacts/metadata.txt",
-            "artifacts/nested/metadata",
-        ] {
-            let path = test_dir.path().join(file);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, "").unwrap();
-        }
-        fs::create_dir_all(test_dir.path().join("src/empty.ts")).unwrap();
-
-        let file_source = WalkDirFileSource::new(Arc::new(config));
-        let mut files: Vec<_> = file_source
-            .find_files()
-            .into_iter()
-            .map(|file| file.name)
-            .collect();
-        files.sort();
-
-        assert_eq!(
-            files,
-            [
-                "artifacts/ExampleQuery.graphql.ts",
-                "artifacts/metadata.txt",
-                "artifacts/nested/metadata",
-                "schema.graphql",
-                "src/Example.ts",
-                "src/mocks/ExampleQuery.json",
-                "src/mocks/nested/metadata",
-            ]
-            .map(PathBuf::from)
-        );
     }
 }
