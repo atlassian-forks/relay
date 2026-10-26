@@ -41,7 +41,7 @@ runs:
       shell: bash
       working-directory: artifacts
       run: |
-        chmod +x linux-x64/relay linux-x64/relay-compiler-ci
-        chmod +x linux-arm64/relay linux-arm64/relay-compiler-ci
+        chmod +x linux-x64/relay
+        chmod +x linux-arm64/relay
         chmod +x macos-x64/relay
         chmod +x macos-arm64/relay

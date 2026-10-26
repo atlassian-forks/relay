@@ -121,6 +121,20 @@ struct CompileCommand {
     /// writing to disk
     #[clap(long)]
     validate: bool,
+
+    /// Load trusted compiler state produced by this compiler and configuration.
+    /// Requires a complete list of changes since that state was saved.
+    #[clap(long = "load-saved-state", requires = "changed_files", conflicts_with_all = ["watch", "project", "repersist"])]
+    load_saved_state: Option<PathBuf>,
+
+    /// JSON array of changed files: [{"name":"src/App.js","exists":true}].
+    /// Names are relative to the configured root, including deleted artifacts.
+    #[clap(long = "changed-files", requires = "load_saved_state", conflicts_with_all = ["watch", "project", "repersist"])]
+    changed_files: Option<PathBuf>,
+
+    /// Write compiler state after successful compilation or validation only.
+    #[clap(long = "save-state", conflicts_with_all = ["watch", "project", "repersist"])]
+    save_state: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -380,7 +394,10 @@ async fn handle_compiler_command(command: CompileCommand) -> Result<(), Error> {
         )
     }));
 
-    config.file_source_config = if should_use_watchman() {
+    config.load_saved_state_file = command.load_saved_state;
+    config.file_source_config = if let Some(changed_files) = command.changed_files {
+        FileSourceKind::External(changed_files)
+    } else if should_use_watchman() {
         FileSourceKind::Watchman
     } else {
         FileSourceKind::WalkDir
@@ -404,12 +421,19 @@ async fn handle_compiler_command(command: CompileCommand) -> Result<(), Error> {
             details: format!("{:?}", err),
         })?;
     } else {
-        compiler
+        let state = compiler
             .compile()
             .await
             .map_err(|err| Error::CompilerError {
                 details: format!("{}", err),
             })?;
+        if let Some(path) = command.save_state {
+            state
+                .serialize_to_file(&path)
+                .map_err(|err| Error::CompilerError {
+                    details: format!("{}", err),
+                })?;
+        }
     }
 
     info!("Done.");
