@@ -377,22 +377,6 @@ fn checkpoint_write_failures_are_reported_and_temporary_files_are_cleaned_up() {
     }));
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn checkpoint_serialization_reports_buffered_write_failures() {
-    let fixture = Fixture::new();
-    fixture.seed();
-    let state = relay_compiler::compiler_state::CompilerState::deserialize_from_file(
-        &fixture.root.join("state.bin"),
-    )
-    .unwrap();
-    assert!(
-        state
-            .serialize_to_file(&PathBuf::from("/dev/full"))
-            .is_err()
-    );
-}
-
 #[test]
 fn cli_rejects_unpaired_flags_and_incompatible_modes() {
     let fixture = Fixture::new();

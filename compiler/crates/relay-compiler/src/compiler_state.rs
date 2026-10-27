@@ -1123,6 +1123,16 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn serialization_reports_buffered_write_failures() {
+        assert!(
+            CompilerState::default()
+                .serialize_to_file(&PathBuf::from("/dev/full"))
+                .is_err()
+        );
+    }
+
     #[test]
     fn external_changes_retain_only_owned_artifacts_of_enabled_projects() {
         use intern::string_key::Intern;

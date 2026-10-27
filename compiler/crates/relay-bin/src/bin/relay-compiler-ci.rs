@@ -5,11 +5,16 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fs;
 use std::fs::File;
+use std::io;
 use std::io::BufReader;
 use std::path::Component;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use clap::Parser;
 use common::ConsoleLogger;
@@ -20,13 +25,11 @@ use relay_compiler::OperationPersister;
 use relay_compiler::PersistConfig;
 use relay_compiler::RemotePersister;
 use relay_compiler::compiler::Compiler;
+use relay_compiler::compiler_state::CompilerState;
 use relay_compiler::config::Config;
 use serde::Deserialize;
 use simplelog::LevelFilter;
 use simplelog::SimpleLogger;
-
-#[path = "../saved_state.rs"]
-mod saved_state;
 
 #[derive(Parser)]
 #[clap(about = "Experimental one-shot Relay checkpoint runner", version)]
@@ -113,7 +116,42 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .compile()
         .await?;
     if let Some(path) = args.state_file {
-        saved_state::save(&state, &path)?;
+        save_state(&state, &path)?;
     }
     Ok(())
+}
+
+static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+// Serialize beside the destination, then atomically replace it only after success.
+fn save_state(state: &CompilerState, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let write_error = |err: io::Error| {
+        io::Error::other(format!(
+            "Unable to save checkpoint {}: {err}",
+            path.display()
+        ))
+    };
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let directory = loop {
+        let directory = parent.join(format!(
+            ".relay-state-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&directory) {
+            Ok(()) => break directory,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(write_error(err).into()),
+        }
+    };
+    let temporary = directory.join("state.bin");
+    let result = (|| {
+        state.serialize_to_file(&temporary)?;
+        fs::rename(&temporary, path).map_err(write_error)?;
+        Ok(())
+    })();
+    // Cleanup must not turn successful checkpoint replacement into a failed run.
+    let _ = fs::remove_file(&temporary);
+    let _ = fs::remove_dir(&directory);
+    result
 }
