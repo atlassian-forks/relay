@@ -68,7 +68,7 @@ impl Fixture {
     }
 
     fn seed(&self) {
-        success(self.run(&["--save-state", "../state.bin"]));
+        success(self.run(&["--state-file", "../state.bin"]));
         assert!(self.root.join("state.bin").is_file());
         assert!(
             self.root
@@ -83,12 +83,10 @@ impl Fixture {
 
     fn incremental(&self, validate: bool) -> Output {
         let mut args = vec![
-            "--load-saved-state",
+            "--state-file",
             "../state.bin",
             "--changed-files",
             "../changes.json",
-            "--save-state",
-            "../next.bin",
         ];
         if validate {
             args.push("--validate");
@@ -125,13 +123,13 @@ fn failure(output: Output) -> String {
 fn full_and_incremental_validation_save_reusable_state() {
     let fixture = Fixture::new();
     fixture.seed();
-    success(fixture.run(&["--validate", "--save-state", "../validated.bin"]));
+    success(fixture.run(&["--validate", "--state-file", "../validated.bin"]));
     success(fixture.incremental(true));
-    fs::copy(
-        fixture.root.join("next.bin"),
-        fixture.root.join("state.bin"),
-    )
-    .unwrap();
+    success(fixture.incremental(true));
+    // Without a delta, even an invalid existing checkpoint is replaced by a
+    // full compilation. It must not be loaded or treated as an empty delta.
+    fs::write(fixture.root.join("state.bin"), "old incompatible state").unwrap();
+    success(fixture.run(&["--validate", "--state-file", "../state.bin"]));
     success(fixture.incremental(true));
 }
 
@@ -145,13 +143,15 @@ fn stale_sources_fail_without_replacing_output_state_then_regenerate_incremental
     )
     .unwrap();
     fixture.changes(json!([{"name": "src/App.ts", "exists": true}]));
-    fs::write(fixture.root.join("next.bin"), "do not replace").unwrap();
+    let original = fs::read(fixture.root.join("state.bin")).unwrap();
     failure(fixture.incremental(true));
-    assert_eq!(
-        fs::read(fixture.root.join("next.bin")).unwrap(),
-        b"do not replace"
-    );
+    assert_eq!(fs::read(fixture.root.join("state.bin")).unwrap(), original);
+    // Full validation failure also preserves the previous checkpoint.
+    failure(fixture.run(&["--validate", "--state-file", "../state.bin"]));
+    assert_eq!(fs::read(fixture.root.join("state.bin")).unwrap(), original);
     success(fixture.incremental(false));
+    fixture.changes(json!([]));
+    success(fixture.incremental(true));
     success(fixture.run(&["--validate"]));
 }
 
@@ -168,8 +168,9 @@ fn artifact_only_deletion_or_edit_cannot_pass_validation() {
         }
         fixture
             .changes(json!([{"name": "src/__generated__/App_user.graphql.ts", "exists": !delete}]));
+        let original = fs::read(fixture.root.join("state.bin")).unwrap();
         failure(fixture.incremental(true));
-        assert!(!fixture.root.join("next.bin").exists());
+        assert_eq!(fs::read(fixture.root.join("state.bin")).unwrap(), original);
         success(fixture.incremental(false));
         success(fixture.run(&["--validate"]));
     }
@@ -225,13 +226,57 @@ fn invalid_state_or_delta_fails_without_watchman_or_output_state() {
             "absolute" => fixture.changes(json!([{"name": "/outside.ts", "exists": true}])),
             _ => unreachable!(),
         }
+        let original = fs::read(fixture.root.join("state.bin")).ok();
         let diagnostic = failure(fixture.incremental(true));
         assert!(
             !diagnostic.to_lowercase().contains("watchman"),
             "{case}: {diagnostic}"
         );
-        assert!(!fixture.root.join("next.bin").exists(), "{case}");
+        assert_eq!(
+            fs::read(fixture.root.join("state.bin")).ok(),
+            original,
+            "{case}"
+        );
     }
+}
+
+#[test]
+fn checkpoint_write_failures_are_reported_and_temporary_files_are_cleaned_up() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    fs::create_dir(fixture.root.join("destination")).unwrap();
+    fs::write(fixture.root.join("destination/keep"), "unchanged").unwrap();
+    // Renaming a completed checkpoint over a directory must fail, not remove it.
+    failure(fixture.run(&["--validate", "--state-file", "../destination"]));
+    assert_eq!(
+        fs::read(fixture.root.join("destination/keep")).unwrap(),
+        b"unchanged"
+    );
+    failure(fixture.run(&["--validate", "--state-file", "../missing/state.bin"]));
+    assert!(!fixture.root.join("missing").exists());
+    assert!(fs::read_dir(&fixture.root).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".relay-state-")
+    }));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn checkpoint_serialization_reports_buffered_write_failures() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    let state = relay_compiler::compiler_state::CompilerState::deserialize_from_file(
+        &fixture.root.join("state.bin"),
+    )
+    .unwrap();
+    assert!(
+        state
+            .serialize_to_file(&PathBuf::from("/dev/full"))
+            .is_err()
+    );
 }
 
 #[test]
@@ -239,12 +284,13 @@ fn cli_rejects_unpaired_flags_and_incompatible_modes() {
     let fixture = Fixture::new();
     for args in [
         vec!["--load-saved-state", "state.bin"],
+        vec!["--save-state", "state.bin"],
         vec!["--changed-files", "changes.json"],
-        vec!["--save-state", "state.bin", "--watch"],
-        vec!["--save-state", "state.bin", "--project", "app"],
-        vec!["--save-state", "state.bin", "--repersist"],
+        vec!["--state-file", "state.bin", "--watch"],
+        vec!["--state-file", "state.bin", "--project", "app"],
+        vec!["--state-file", "state.bin", "--repersist"],
         vec![
-            "--load-saved-state",
+            "--state-file",
             "state.bin",
             "--changed-files",
             "changes.json",

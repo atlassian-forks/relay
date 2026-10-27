@@ -784,15 +784,28 @@ impl CompilerState {
             .map_err(|err| Error::WriteFileError {
                 file: path.clone(),
                 source: err,
-            })?
-            .auto_finish();
+            })?;
 
-        let writer =
+        let mut writer =
             BufWriter::with_capacity(ZstdEncoder::<FsFile>::recommended_input_size(), writer);
-        bincode::serialize_into(writer, self).map_err(|err| Error::SerializationError {
+        bincode::serialize_into(&mut writer, self).map_err(|err| Error::SerializationError {
             file: path.clone(),
             source: err,
-        })
+        })?;
+        // Drop/auto_finish discard flush errors. Observe both buffering and zstd
+        // finalization failures before a caller can publish the checkpoint.
+        writer
+            .into_inner()
+            .map_err(|err| Error::WriteFileError {
+                file: path.clone(),
+                source: err.into_error(),
+            })?
+            .finish()
+            .map_err(|err| Error::WriteFileError {
+                file: path.clone(),
+                source: err,
+            })?;
+        Ok(())
     }
 
     pub fn deserialize_from_file(path: &PathBuf) -> Result<Self> {

@@ -8,22 +8,33 @@ there is no additional executable, npm package, build pipeline, or Watchman serv
 
 ```sh
 # Full validation and initial state creation.
-FORCE_NO_WATCHMAN=1 relay relay.config.json --validate --save-state state.bin
+FORCE_NO_WATCHMAN=1 relay relay.config.json --validate --state-file state.bin
 
 # Incremental validation and refreshed state, using the same executable/config.
 relay relay.config.json --validate \
-  --load-saved-state state.bin \
-  --changed-files changes.json \
-  --save-state next-state.bin
+  --state-file state.bin \
+  --changed-files changes.json
 ```
 
-Omit `--validate` for normal artifact generation. `--save-state` is optional, and is
-executed only after compilation/validation succeeds. A state write error is reported
-as a command failure. Prefer a distinct output path; the caller is responsible for
-atomically publishing it after the command succeeds.
+Omit `--validate` for normal artifact generation.
 
-`--load-saved-state` and `--changed-files` must be supplied together. The state flags
-cannot be combined with `--watch`, `--project`, or `--repersist`. State should cover
+- `--state-file` alone performs a **full compilation**, without loading any existing
+  checkpoint, and creates or replaces that checkpoint after success.
+- Adding `--changed-files` loads the checkpoint and applies the complete delta. This
+  requires an existing, compatible checkpoint; there is no implicit full fallback.
+- Successful runs serialize to a temporary sibling directory, finish all buffered
+  writes, and atomically rename the completed file over the checkpoint. Validation,
+  serialization, or replacement failures leave the previous checkpoint unchanged.
+  State write failures return a failing exit status. Atomic replacement does not
+  provide crash durability or coordination between concurrent writers.
+
+`--changed-files` requires `--state-file`. Both paths are relative to the process
+working directory (unlike names inside the delta). Use a private working checkpoint
+per invocation; download/copy the original into it and publish the updated checkpoint
+only after success. Keep it outside Relay's source directories. To retain an original
+snapshot for repeated benchmarks, restore it before each run.
+
+The state flags cannot be combined with `--watch`, `--project`, or `--repersist`. State should cover
 the whole configured project set; project filtering and repersistence are not part
 of this incremental CLI contract.
 
@@ -58,8 +69,8 @@ project selection, and source/sparse-checkout scope. The native saved-state vers
 check remains enabled by default; do not bypass it in CI. Callers must separately
 key snapshots by compiler build and checkout scope.
 
-Invalid/missing state, version mismatches, or invalid changed-files input fail the
-command. External mode no longer silently attempts a full Watchman query. The caller
+In incremental mode, invalid/missing state, version mismatches, or invalid
+changed-files input fail the command. External mode no longer silently attempts a full Watchman query. The caller
 can deliberately choose a full run when its snapshot is unavailable/incompatible;
 **do not blindly retry every nonzero validation exit**, since artifact/GraphQL errors
 must remain failures. Failed compilation/validation does not write output state.
