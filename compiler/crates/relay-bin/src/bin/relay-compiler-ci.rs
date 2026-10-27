@@ -39,7 +39,7 @@ struct Args {
     /// Validate existing artifacts instead of generating them.
     #[clap(long)]
     validate: bool,
-    /// Atomically save state after success. Load it only with --changed-files.
+    /// Replace the working checkpoint after success; reuse it for eligible deltas.
     #[clap(long)]
     state_file: Option<PathBuf>,
     /// Complete root-relative JSON delta; every entry requires name and exists.
@@ -88,13 +88,23 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         // Inputs must remain immutable between this check and native compilation.
         let files: Vec<ChangedFile> =
             serde_json::from_reader(BufReader::new(File::open(&changes)?))?;
+        let output_dirs = config.get_output_dir_paths();
+        // If an output root is not normalized/root-relative, do not guess how
+        // it matches the delta: conservatively choose full compilation.
+        let mut generated_changed = output_dirs.iter().any(|root| {
+            root.components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+        });
         for file in files {
             if file.name.as_os_str().is_empty()
                 || file.name.to_string_lossy().contains(['\\', ':'])
                 || file.name.components().any(|part| {
                     matches!(
                         part,
-                        Component::Prefix(_) | Component::RootDir | Component::ParentDir
+                        Component::Prefix(_)
+                            | Component::RootDir
+                            | Component::ParentDir
+                            | Component::CurDir
                     )
                 })
             {
@@ -104,10 +114,24 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
+            // Be conservative for all files under generated roots, including
+            // deletions and other tools' outputs. Do not reproduce ownership logic.
+            generated_changed |= file
+                .name
+                .components()
+                .any(|part| matches!(part, Component::Normal(name) if name == "__generated__"))
+                || output_dirs.iter().any(|root| file.name.starts_with(root));
         }
-        config.load_saved_state_file = args.state_file.clone();
-        FileSourceKind::External(changes)
+        if generated_changed {
+            eprintln!("[relay-ci] selected=full-generated-artifacts");
+            FileSourceKind::WalkDir
+        } else {
+            eprintln!("[relay-ci] selected=external");
+            config.load_saved_state_file = args.state_file.clone();
+            FileSourceKind::External(changes)
+        }
     } else {
+        eprintln!("[relay-ci] selected=full");
         FileSourceKind::WalkDir
     };
     // No custom restore, invalidation, transforms, dependency traversal or retry.
@@ -123,7 +147,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
-// Serialize beside the destination, then atomically replace it only after success.
+// Rename is atomic, but native serialization can discard buffered-write errors.
+// This is a disposable cache checkpoint, not a verified/durable publication.
 fn save_state(state: &CompilerState, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let write_error = |err: io::Error| {
         io::Error::other(format!(

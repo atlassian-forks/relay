@@ -112,13 +112,18 @@ impl Drop for Fixture {
     }
 }
 
-fn success(output: Output) {
+fn success(output: Output) -> String {
     assert!(
         output.status.success(),
         "stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 fn failure(output: Output) -> String {
@@ -135,8 +140,8 @@ fn full_and_incremental_validation_save_reusable_state() {
     let fixture = Fixture::new();
     fixture.seed();
     success(fixture.run(&["--validate", "--state-file", "../validated.bin"]));
-    success(fixture.incremental(true));
-    success(fixture.incremental(true));
+    assert!(success(fixture.incremental(true)).contains("selected=external"));
+    assert!(success(fixture.incremental(true)).contains("selected=external"));
     // Without a delta, even an invalid existing checkpoint is replaced by a
     // full compilation. It must not be loaded or treated as an empty delta.
     fs::write(fixture.root.join("state.bin"), "old incompatible state").unwrap();
@@ -180,15 +185,15 @@ fn artifact_only_deletion_or_edit_cannot_pass_validation() {
         fixture
             .changes(json!([{"name": "src/__generated__/App_user.graphql.ts", "exists": !delete}]));
         let original = fs::read(fixture.root.join("state.bin")).unwrap();
-        failure(fixture.incremental(true));
+        assert!(failure(fixture.incremental(true)).contains("selected=full-generated-artifacts"));
         assert_eq!(fs::read(fixture.root.join("state.bin")).unwrap(), original);
-        success(fixture.incremental(false));
+        assert!(success(fixture.incremental(false)).contains("selected=full-generated-artifacts"));
         success(fixture.run(&["--validate"]));
     }
 }
 
 #[test]
-fn fragment_changes_reach_transitive_operations_without_dirty_operation_inputs() {
+fn fragment_changes_use_external_without_outputs_and_full_with_outputs() {
     let fixture = Fixture::new();
     fs::write(
         fixture.root.join("src/Middle.ts"),
@@ -214,6 +219,13 @@ fn fragment_changes_reach_transitive_operations_without_dirty_operation_inputs()
         "const node = graphql`fragment App_user on User { id name }`;",
     )
     .unwrap();
+    fixture.changes(json!([{"name": "src/App.ts", "exists": true}]));
+    let source_only = failure(fixture.incremental(true));
+    assert!(source_only.contains("selected=external"), "{source_only}");
+    assert!(
+        source_only.contains("ViewerQuery.graphql.ts"),
+        "{source_only}"
+    );
     success(fixture.run_stock(&[]));
     let correct_operation = fs::read(&operation).unwrap();
     let correct_middle = fs::read(&middle).unwrap();
@@ -226,6 +238,10 @@ fn fragment_changes_reach_transitive_operations_without_dirty_operation_inputs()
     ]));
     let original_state = fs::read(fixture.root.join("state.bin")).unwrap();
     let diagnostic = failure(fixture.incremental(true));
+    assert!(
+        diagnostic.contains("selected=full-generated-artifacts"),
+        "{diagnostic}"
+    );
     assert!(
         diagnostic.contains("ViewerQuery.graphql.ts"),
         "{diagnostic}"
@@ -242,9 +258,9 @@ fn fragment_changes_reach_transitive_operations_without_dirty_operation_inputs()
         {"name": "src/__generated__/Middle_user.graphql.ts", "exists": true},
         {"name": "src/__generated__/ViewerQuery.graphql.ts", "exists": true}
     ]));
-    success(fixture.incremental(true));
+    assert!(success(fixture.incremental(true)).contains("selected=full-generated-artifacts"));
     fixture.changes(json!([]));
-    success(fixture.incremental(true));
+    assert!(success(fixture.incremental(true)).contains("selected=external"));
 }
 
 #[test]
@@ -259,6 +275,35 @@ fn artifacts_from_other_tools_are_not_rewritten() {
     fs::remove_file(fixture.root.join("src/__generated__/App_user.graphql.ts")).unwrap();
     fixture.changes(json!([{"name": "src/__generated__/App_user.graphql.ts", "exists": false}]));
     failure(fixture.incremental(true));
+}
+
+#[test]
+fn explicit_output_changes_use_full_validation_without_loading_state() {
+    for output in ["artifacts", "./artifacts"] {
+        let fixture = Fixture::new();
+        let path = fixture.root.join("relay.config.json");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        config["projects"]["app"]["output"] = json!(output);
+        fs::write(path, config.to_string()).unwrap();
+        success(fixture.run_stock(&[]));
+        success(fixture.run(&["--validate", "--state-file", "../state.bin"]));
+        fixture.changes(json!([{"name": "artifacts/App_user.graphql.ts", "exists": true}]));
+        fs::remove_file(fixture.root.join("state.bin")).unwrap();
+        assert!(success(fixture.incremental(true)).contains("selected=full-generated-artifacts"));
+        for delete in [false, true] {
+            let artifact = fixture.root.join("artifacts/App_user.graphql.ts");
+            if delete {
+                fs::remove_file(&artifact).unwrap();
+            } else {
+                fs::write(&artifact, "invalid artifact").unwrap();
+            }
+            fixture.changes(json!([{"name": "artifacts/App_user.graphql.ts", "exists": !delete}]));
+            assert!(
+                failure(fixture.incremental(true)).contains("selected=full-generated-artifacts")
+            );
+        }
+    }
 }
 
 #[test]
@@ -324,6 +369,7 @@ fn invalid_delta_is_rejected_by_the_caller_without_watchman() {
     for name in [
         "",
         "../outside.ts",
+        "./artifacts/App_user.graphql.ts",
         "/outside.ts",
         "C:/outside.ts",
         "src\\Other.ts",

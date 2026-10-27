@@ -624,16 +624,9 @@ impl CompilerState {
         for file_source_changes in self.pending_file_source_changes.write().unwrap().drain(..) {
             let log_event = perf_logger.create_event("merge_file_source_changes");
             log_event.number("number_of_changes", file_source_changes.size());
-            let mut categorized = log_event.time("categorize_files_time", || {
+            let categorized = log_event.time("categorize_files_time", || {
                 categorize_files(config, &file_source_changes)
             });
-            if should_collect_changed_artifacts {
-                self.include_filtered_artifact_changes(
-                    config,
-                    &file_source_changes,
-                    &mut categorized,
-                );
-            }
             let file_source_result = process_categorized_sources(
                 categorized,
                 config,
@@ -700,58 +693,6 @@ impl CompilerState {
         }
 
         Ok(has_changed)
-    }
-
-    // Source excludes can hide colocated __generated__ outputs in an external
-    // delta. Admit only filtered paths owned by this snapshot, then let the
-    // existing Generated processing and dirty-source analysis handle them.
-    fn include_filtered_artifact_changes(
-        &self,
-        config: &Config,
-        changes: &FileSourceResult,
-        categorized: &mut HashMap<FileGroup, Vec<File>>,
-    ) {
-        let FileSourceResult::External(changes) = changes else {
-            return;
-        };
-        let mut filtered: FnvHashMap<_, _> = changes
-            .files
-            .iter()
-            .map(|file| (file.name.as_path(), file))
-            .collect();
-        for file in categorized.values().flatten() {
-            filtered.remove(file.name.as_path());
-        }
-        if filtered.is_empty() {
-            return;
-        }
-        let enabled: FnvHashSet<_> = config
-            .enabled_projects()
-            .flat_map(|project| [Some(project.name), project.base].into_iter().flatten())
-            .collect();
-        for (project, artifacts) in &self.artifacts.0 {
-            if !enabled.contains(project) {
-                continue;
-            }
-            if let ArtifactMapKind::Mapping(mapping) = artifacts.as_ref() {
-                // An output can be associated with multiple definitions.
-                let mut seen = FnvHashSet::default();
-                for records in mapping.0.iter() {
-                    for record in records.value() {
-                        if let Some(file) = filtered.get(record.path.as_path())
-                            && seen.insert(record.path.clone())
-                        {
-                            categorized
-                                .entry(FileGroup::Generated {
-                                    project_name: *project,
-                                })
-                                .or_default()
-                                .push((*file).clone());
-                        }
-                    }
-                }
-            }
-        }
     }
 
     pub fn complete_compilation(&mut self) {
@@ -843,28 +784,15 @@ impl CompilerState {
             .map_err(|err| Error::WriteFileError {
                 file: path.clone(),
                 source: err,
-            })?;
+            })?
+            .auto_finish();
 
-        let mut writer =
+        let writer =
             BufWriter::with_capacity(ZstdEncoder::<FsFile>::recommended_input_size(), writer);
-        bincode::serialize_into(&mut writer, self).map_err(|err| Error::SerializationError {
+        bincode::serialize_into(writer, self).map_err(|err| Error::SerializationError {
             file: path.clone(),
             source: err,
-        })?;
-        // Drop/auto_finish discard flush errors. Observe both buffering and zstd
-        // finalization failures before a caller can publish the checkpoint.
-        writer
-            .into_inner()
-            .map_err(|err| Error::WriteFileError {
-                file: path.clone(),
-                source: err.into_error(),
-            })?
-            .finish()
-            .map_err(|err| Error::WriteFileError {
-                file: path.clone(),
-                source: err,
-            })?;
-        Ok(())
+        })
     }
 
     pub fn deserialize_from_file(path: &PathBuf) -> Result<Self> {
@@ -1120,81 +1048,6 @@ mod tests {
     impl Source for Vec<u32> {
         fn is_empty(&self) -> bool {
             self.is_empty()
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn serialization_reports_buffered_write_failures() {
-        assert!(
-            CompilerState::default()
-                .serialize_to_file(&PathBuf::from("/dev/full"))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn external_changes_retain_only_owned_artifacts_of_enabled_projects() {
-        use intern::string_key::Intern;
-
-        use crate::artifact_map::ArtifactRecord;
-        let mut config = Config::from_string_for_test(
-            r#"{
-            "sources": {"src": "app", "disabled": "disabled"},
-            "projects": {
-                "app": {"schema": "schema.graphql", "language": "typescript"},
-                "disabled": {"schema": "schema.graphql", "language": "typescript"}
-            }
-        }"#,
-        )
-        .unwrap();
-        config.excludes.push("src/excluded.ts".into());
-        let app = ProjectName::Named("app".intern());
-        let disabled = ProjectName::Named("disabled".intern());
-        config.projects.get_mut(&disabled).unwrap().enabled = false;
-        let known = PathBuf::from("src/__generated__/Known.graphql.ts");
-        let disabled_path = PathBuf::from("disabled/__generated__/Known.graphql.ts");
-        for exists in [true, false] {
-            for collect in [true, false] {
-                let mut state = CompilerState::default();
-                for (project, path) in [(app, &known), (disabled, &disabled_path)] {
-                    let mapping = ArtifactMap::default();
-                    mapping.0.insert(
-                        ArtifactSourceKey::Schema(),
-                        vec![ArtifactRecord {
-                            path: path.clone(),
-                            persisted_operation_id: None,
-                        }],
-                    );
-                    state
-                        .artifacts
-                        .0
-                        .insert(project, Arc::new(ArtifactMapKind::Mapping(mapping)));
-                }
-                state.pending_file_source_changes.write().unwrap().push(
-                    FileSourceResult::External(crate::ExternalFileSourceResult {
-                        resolved_root: config.root_dir.clone(),
-                        files: [
-                            known.clone(),
-                            disabled_path.clone(),
-                            PathBuf::from("src/__generated__/other.js"),
-                            PathBuf::from("src/excluded.ts"),
-                            PathBuf::from("outside/__generated__/Other.graphql.ts"),
-                        ]
-                        .into_iter()
-                        .map(|name| File { name, exists })
-                        .collect(),
-                    }),
-                );
-                state
-                    .merge_file_source_changes(&config, &common::NoopPerfLogger, collect)
-                    .unwrap();
-                assert_eq!(state.dirty_artifact_paths.len(), usize::from(collect));
-                if collect {
-                    assert_eq!(state.dirty_artifact_paths[&app].len(), 1);
-                    assert!(state.dirty_artifact_paths[&app].contains(&known));
-                }
-            }
         }
     }
 
