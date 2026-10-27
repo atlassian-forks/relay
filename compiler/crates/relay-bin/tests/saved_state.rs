@@ -56,7 +56,15 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_relay"))
+        self.run_binary(env!("CARGO_BIN_EXE_relay-compiler-ci"), args)
+    }
+
+    fn run_stock(&self, args: &[&str]) -> Output {
+        self.run_binary(env!("CARGO_BIN_EXE_relay"), args)
+    }
+
+    fn run_binary(&self, binary: &str, args: &[&str]) -> Output {
+        Command::new(binary)
             // Deliberately different from config.root, including for omitted exists.
             .current_dir(self.root.join("runner"))
             .env("FORCE_NO_WATCHMAN", "1")
@@ -180,7 +188,81 @@ fn artifact_only_deletion_or_edit_cannot_pass_validation() {
 }
 
 #[test]
-fn omitted_exists_is_resolved_against_config_root() {
+fn fragment_changes_reach_transitive_operations_without_dirty_operation_inputs() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("src/Middle.ts"),
+        "const node = graphql`fragment Middle_user on User { ...App_user }`;",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("src/Viewer.ts"),
+        "const node = graphql`query ViewerQuery { viewer { ...Middle_user } }`;",
+    )
+    .unwrap();
+    fixture.seed();
+    let operation = fixture
+        .root
+        .join("src/__generated__/ViewerQuery.graphql.ts");
+    let middle = fixture
+        .root
+        .join("src/__generated__/Middle_user.graphql.ts");
+    let original_operation = fs::read(&operation).unwrap();
+    let original_middle = fs::read(&middle).unwrap();
+    fs::write(
+        fixture.root.join("src/App.ts"),
+        "const node = graphql`fragment App_user on User { id name }`;",
+    )
+    .unwrap();
+    success(fixture.run_stock(&[]));
+    let correct_operation = fs::read(&operation).unwrap();
+    let correct_middle = fs::read(&middle).unwrap();
+    assert_ne!(original_operation, correct_operation);
+    fs::write(&operation, original_operation).unwrap();
+    fs::write(&middle, original_middle).unwrap();
+    fixture.changes(json!([
+        {"name": "src/App.ts", "exists": true},
+        {"name": "src/__generated__/App_user.graphql.ts", "exists": true}
+    ]));
+    let original_state = fs::read(fixture.root.join("state.bin")).unwrap();
+    let diagnostic = failure(fixture.incremental(true));
+    assert!(
+        diagnostic.contains("ViewerQuery.graphql.ts"),
+        "{diagnostic}"
+    );
+    assert_eq!(
+        fs::read(fixture.root.join("state.bin")).unwrap(),
+        original_state
+    );
+    fs::write(&operation, correct_operation).unwrap();
+    fs::write(&middle, correct_middle).unwrap();
+    fixture.changes(json!([
+        {"name": "src/App.ts", "exists": true},
+        {"name": "src/__generated__/App_user.graphql.ts", "exists": true},
+        {"name": "src/__generated__/Middle_user.graphql.ts", "exists": true},
+        {"name": "src/__generated__/ViewerQuery.graphql.ts", "exists": true}
+    ]));
+    success(fixture.incremental(true));
+    fixture.changes(json!([]));
+    success(fixture.incremental(true));
+}
+
+#[test]
+fn artifacts_from_other_tools_are_not_rewritten() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    let other = fixture.root.join("src/__generated__/other.js");
+    fs::write(&other, "other tool output").unwrap();
+    fixture.changes(json!([{"name": "src/__generated__/other.js", "exists": true}]));
+    success(fixture.incremental(true));
+    assert_eq!(fs::read(&other).unwrap(), b"other tool output");
+    fs::remove_file(fixture.root.join("src/__generated__/App_user.graphql.ts")).unwrap();
+    fixture.changes(json!([{"name": "src/__generated__/App_user.graphql.ts", "exists": false}]));
+    failure(fixture.incremental(true));
+}
+
+#[test]
+fn caller_requires_explicit_exists_without_changing_native_reader() {
     let fixture = Fixture::new();
     fixture.seed();
     fs::write(
@@ -189,6 +271,9 @@ fn omitted_exists_is_resolved_against_config_root() {
     )
     .unwrap();
     fixture.changes(json!([{"name": "src/Other.ts"}]));
+    let error = failure(fixture.incremental(true));
+    assert!(error.contains("missing field `exists`"), "{error}");
+    fixture.changes(json!([{"name": "src/Other.ts", "exists": true}]));
     failure(fixture.incremental(true));
     success(fixture.incremental(false));
     assert!(
@@ -202,22 +287,12 @@ fn omitted_exists_is_resolved_against_config_root() {
 
 #[test]
 fn invalid_external_inputs_retain_upstream_watchman_fallback() {
-    for case in [
-        "missing-state",
-        "corrupt-state",
-        "missing-delta",
-        "malformed-delta",
-        "version-mismatch",
-        "traversal",
-        "absolute",
-    ] {
+    for case in ["missing-state", "corrupt-state", "version-mismatch"] {
         let fixture = Fixture::new();
         fixture.seed();
         match case {
             "missing-state" => fs::remove_file(fixture.root.join("state.bin")).unwrap(),
             "corrupt-state" => fs::write(fixture.root.join("state.bin"), "not state").unwrap(),
-            "missing-delta" => fs::remove_file(fixture.root.join("changes.json")).unwrap(),
-            "malformed-delta" => fs::write(fixture.root.join("changes.json"), "not json").unwrap(),
             "version-mismatch" => {
                 let path = fixture.root.join("relay.config.json");
                 let mut config: serde_json::Value =
@@ -225,8 +300,6 @@ fn invalid_external_inputs_retain_upstream_watchman_fallback() {
                 config["codegenCommand"] = json!("different-codegen-command");
                 fs::write(path, config.to_string()).unwrap();
             }
-            "traversal" => fixture.changes(json!([{"name": "../outside.ts", "exists": true}])),
-            "absolute" => fixture.changes(json!([{"name": "/outside.ts", "exists": true}])),
             _ => unreachable!(),
         }
         let original = fs::read(fixture.root.join("state.bin")).ok();
@@ -241,6 +314,44 @@ fn invalid_external_inputs_retain_upstream_watchman_fallback() {
             "{case}"
         );
     }
+}
+
+#[test]
+fn invalid_delta_is_rejected_by_the_caller_without_watchman() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    let original = fs::read(fixture.root.join("state.bin")).unwrap();
+    for name in [
+        "",
+        "../outside.ts",
+        "/outside.ts",
+        "C:/outside.ts",
+        "src\\Other.ts",
+    ] {
+        fixture.changes(json!([{"name": name, "exists": true}]));
+        let error = failure(fixture.incremental(true));
+        assert!(error.contains("Invalid root-relative"), "{error}");
+        assert!(!error.to_lowercase().contains("watchman"), "{error}");
+    }
+    fs::write(fixture.root.join("changes.json"), "not json").unwrap();
+    failure(fixture.incremental(true));
+    fs::remove_file(fixture.root.join("changes.json")).unwrap();
+    failure(fixture.incremental(true));
+    assert_eq!(fs::read(fixture.root.join("state.bin")).unwrap(), original);
+}
+
+#[test]
+fn ordinary_cli_does_not_expose_checkpoint_flags() {
+    let fixture = Fixture::new();
+    success(fixture.run_stock(&[]));
+    success(fixture.run_stock(&["--validate"]));
+    assert_eq!(
+        fixture
+            .run_stock(&["--state-file", "../state.bin"])
+            .status
+            .code(),
+        Some(2)
+    );
 }
 
 #[test]

@@ -1,48 +1,43 @@
-# One-shot compilation with saved state
+# Experimental CI checkpoint executable
 
-The existing `relay` executable can reuse native compiler state with a caller-supplied
-file delta. This exposes the existing `FileSourceKind::External` implementation;
-there is no additional executable, npm package, or build pipeline. Successful external
-state loading does not require Watchman; upstream's recovery path still does.
+`relay-compiler-ci` is a thin caller of Relay's existing `Compiler::compile()` and
+`FileSourceKind::External` machinery. The stock `relay` executable, external reader,
+and Watchman recovery policy are unchanged. There is no second implementation of
+compilation, dependency analysis, persistence, or artifact generation.
 
-## CLI
+This is a draft integration, not a production release or an upstream-agreed CLI.
+
+## Build and use
+
+From `compiler/`:
 
 ```sh
-# Full validation and initial state creation.
-FORCE_NO_WATCHMAN=1 relay relay.config.json --validate --state-file state.bin
-
-# Incremental validation and refreshed state, using the same executable/config.
-relay relay.config.json --validate \
-  --state-file state.bin \
-  --changed-files changes.json
+cargo build --locked -p relay --bin relay-compiler-ci
 ```
 
-Omit `--validate` for normal artifact generation.
+```sh
+# Full validation creates/replaces a working checkpoint (WalkDir, not Watchman).
+relay-compiler-ci relay.config.json --validate --state-file state.bin
 
-- `--state-file` alone performs a **full compilation**, without loading any existing
-  checkpoint, and creates or replaces that checkpoint after success.
-- Adding `--changed-files` loads the checkpoint and applies the complete delta. This
-  needs an existing, compatible checkpoint for an incremental run. Upstream's full
-  Watchman fallback remains unchanged if external-state setup fails.
-- Successful runs serialize to a temporary sibling directory, finish all buffered
-  writes, and atomically rename the completed file over the checkpoint. Validation,
-  serialization, or replacement failures leave the previous checkpoint unchanged.
-  State write failures return a failing exit status. Atomic replacement does not
-  provide crash durability or coordination between concurrent writers.
+# Native incremental validation refreshes the same checkpoint after success.
+relay-compiler-ci relay.config.json --validate \
+  --state-file state.bin --changed-files changes.json
+```
 
-`--changed-files` requires `--state-file`. Both paths are relative to the process
-working directory (unlike names inside the delta). Use a private working checkpoint
-per invocation; download/copy the original into it and publish the updated checkpoint
-only after success. Keep it outside Relay's source directories. To retain an original
-snapshot for repeated benchmarks, restore it before each run.
+Omit `--validate` to generate artifacts. Neither watch mode nor project filtering
+is supported by this entry point. `--state-file` without a delta always performs a
+full compilation, even when a checkpoint already exists. Without `--state-file`,
+the runner performs an ordinary full compilation/validation without saving state.
 
-The state flags cannot be combined with `--watch`, `--project`, or `--repersist`. State should cover
-the whole configured project set; project filtering and repersistence are not part
-of this incremental CLI contract.
+The executable is Cargo-discovered in the existing package; it adds no dependencies.
+Release artifact collection/npm packaging **has not been wired**. Normal stock
+release behavior remains unchanged. Do not substitute this executable into AFM's
+old standalone benchmark/shadow runner: that prototype uses a different protocol.
+No frontend developer command or required CI check changes with this draft.
 
-## Changed files
+## Caller contract
 
-The input is a JSON array, not the entire Watchman protocol response:
+The delta is a complete JSON array relative to the **configured Relay root**:
 
 ```json
 [
@@ -52,58 +47,75 @@ The input is a JSON array, not the entire Watchman protocol response:
 ]
 ```
 
-- `name` is relative to the **configured Relay root**, not the process working directory.
-  Absolute, drive-prefixed, parent-traversal, and empty paths are rejected by the
-  external reader (which triggers upstream's recovery path).
-- If `exists` is omitted, the compiler checks the path under that root.
-- Include **every** relevant change since the saved state: sources, schema,
-  extensions/resolvers, and generated artifacts, including edits and deletions.
-  Represent renames as deletion plus addition. Supply `[]` only when nothing changed.
-- Known saved-state artifacts are invalidated even under default `__generated__`
-  directories, which the non-Watchman source filter ordinarily excludes.
-- Inputs must remain stable while compilation runs. The CLI does not compute Git
-  deltas, verify checkout cleanliness, or discover missing entries in the delta.
+- `exists` is required. The caller computes it against the configured root. This
+  avoids relying on the native optional-existence lookup's working directory.
+- The runner rejects empty, absolute, traversal, backslash and colon-containing
+  paths. It checks delta syntax before invoking the compiler, without changing
+  shared external-reader behavior.
+- Include every source, schema, resolver/extension and artifact change since the
+  checkpoint. Represent renames as deletion plus addition. `[]` means no changes.
+- State/delta **file arguments** are relative to the process working directory.
+- Inputs must remain immutable, including between the caller's checks and native
+  compilation. This runner does not verify checkout cleanliness or delta completeness.
+- State is trusted, compiler-specific data. Use the exact compiler build, compatible
+  evaluated configuration and source/sparse-checkout scope; do not bypass native
+  saved-state version checking in CI.
 
-## Compatibility and failures
+## Checkpoint publication and failures
 
-Saved states are trusted, compiler-specific binary data, not a portable or untrusted
-interchange format. Use the same compiler build, compatible evaluated configuration,
-project selection, and source/sparse-checkout scope. The native saved-state version
-check remains enabled by default; do not bypass it in CI. Callers must separately
-key snapshots by compiler build and checkout scope.
+The runner writes a temporary sibling checkpoint, then atomically renames it after
+successful compilation/validation and serialization. Failures preserve the prior
+working checkpoint. Atomic replacement does not provide crash durability or writer
+coordination: use a private working checkpoint per invocation, outside source roots.
+Cache transport, authentication, revision tracking and remote publication belong to
+AFM and are not implemented here.
 
-Upstream's `FileSource::External` recovery policy is unchanged: failures while
-creating state from external inputs (including missing/invalid state, version
-mismatches or invalid deltas) log a warning and attempt a full Watchman query.
-This fallback can succeed if Watchman is available. It does not consult
-`FORCE_NO_WATCHMAN`, which only controls normal CLI file-source selection. Therefore,
-a successful command is not by itself evidence of an incremental hit.
+Upstream's external-state setup fallback is unchanged. Missing/corrupt/incompatible
+state or other native setup errors can attempt a full Watchman query. That recovery
+path does not consult `FORCE_NO_WATCHMAN`; a successful exit alone does not establish
+an incremental hit. If the caller knows no snapshot is available, omit the delta
+for an explicit full WalkDir run. A strict no-Watchman-on-error API remains an
+upstream integration question, not a new global compiler policy.
 
-If a caller knows its snapshot is unavailable, it can deliberately request full
-compilation by omitting `--changed-files` (with `FORCE_NO_WATCHMAN=1` to use WalkDir).
-A strict no-Watchman/error-on-invalid-input CI policy is not implemented by these
-flags. Resolve that integration contract before rollout; do not change the shared
-fallback policy for other callers. **Do not blindly retry nonzero validation exits**:
-failed compilation/validation does not write output state.
+Actual validation failures are not retried by this runner. It uses the stock
+Atlassian persister and extra-artifact hooks; there is no new guarantee of zero
+persisted-query network requests.
 
-Ordinary invocations without these flags keep their current Watchman/WalkDir selection,
-artifact generation, validation, and persistence behavior. In particular, this change
-adds no new persisted-query registration policy: `--validate` retains its existing
-persister behavior and is not a guarantee of zero network requests.
+## Independently testable library fixes
 
-This is compiler plumbing, not an AFM cache rollout. Authenticated snapshot transport,
-revision bookkeeping, cache retention, stable configuration evaluation, full/incremental
-parity for product-specific artifacts and deletions, and shadow/rollback policy remain
-caller responsibilities. Do not replace authoritative CI validation until those are
-verified on real checkouts.
+The remaining library changes are confined to `compiler_state.rs`:
 
-## Tests
+1. **Filtered owned artifacts:** when merging an external delta after restore,
+   source filters can hide colocated `__generated__` outputs. Re-admit only filtered
+   paths owned by the snapshot for enabled/base projects into the existing Generated
+   processing. Do not scan/reparse a replacement dependency graph, broaden source
+   discovery, or treat another tool's generated output as Relay-owned.
+2. **Serialization errors:** explicitly finish the buffered writer and zstd encoder
+   so write failures are observable before the caller publishes a checkpoint.
 
-From `compiler/`:
+The artifact integration regression was observed failing before the first fix.
+A native library test covers edits/deletions, disabled projects, excluded sources,
+unknown outputs, and the collect-changed-artifacts switch independently of this bin.
+The serialization write-failure regression uses `/dev/full` on Linux.
+
+These fixes still require upstream review; they are not claims of an upstream
+supported production embedding API. There are no changes to `compiler.rs`, stock
+`main.rs`, `file_source.rs`, or `external_file_source.rs` in the net PR diff.
+
+## Tests and rollout boundary
 
 ```sh
 cargo test --locked -p relay --test saved_state
+cargo test --locked -p relay-compiler --lib
 ```
 
-The normal workspace test job discovers these integration tests. They invoke the actual
-`relay` executable on disposable projects, without Watchman or remote services.
+Integration tests invoke the actual executables on disposable projects. They cover
+checkpoint reuse, semantic failure preservation, artifact-only edits/deletions,
+transitive fragment invalidation with only source/own-artifact inputs changed,
+foreign generated outputs, caller input checks, upstream recovery, and stock CLI
+isolation. Tests remove Watchman from PATH so recovery cannot use a developer daemon.
+
+Current verification is local macOS correctness testing. Linux write-failure tests,
+full-AFM/persisted-mock parity, performance, release packaging and authenticated cache
+integration remain follow-ups. Historical standalone Linux benchmarks do **not**
+verify this thinner executable. Keep existing required validation authoritative.

@@ -46,7 +46,6 @@ use simplelog::TermLogger;
 use simplelog::TerminalMode;
 
 mod errors;
-mod saved_state;
 
 use errors::Error;
 
@@ -122,16 +121,6 @@ struct CompileCommand {
     /// writing to disk
     #[clap(long)]
     validate: bool,
-
-    /// Atomically save compiler state after success. With --changed-files, also
-    /// load this trusted checkpoint; otherwise perform a full compilation.
-    #[clap(long = "state-file", conflicts_with_all = ["watch", "project", "repersist"])]
-    state_file: Option<PathBuf>,
-
-    /// JSON array of changed files: [{"name":"src/App.js","exists":true}].
-    /// Names are relative to the configured root, including deleted artifacts.
-    #[clap(long = "changed-files", requires = "state_file", conflicts_with_all = ["watch", "project", "repersist"])]
-    changed_files: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -391,14 +380,7 @@ async fn handle_compiler_command(command: CompileCommand) -> Result<(), Error> {
         )
     }));
 
-    config.load_saved_state_file = if command.changed_files.is_some() {
-        command.state_file.clone()
-    } else {
-        None
-    };
-    config.file_source_config = if let Some(changed_files) = command.changed_files {
-        FileSourceKind::External(changed_files)
-    } else if should_use_watchman() {
+    config.file_source_config = if should_use_watchman() {
         FileSourceKind::Watchman
     } else {
         FileSourceKind::WalkDir
@@ -422,15 +404,12 @@ async fn handle_compiler_command(command: CompileCommand) -> Result<(), Error> {
             details: format!("{:?}", err),
         })?;
     } else {
-        let state = compiler
+        compiler
             .compile()
             .await
             .map_err(|err| Error::CompilerError {
                 details: format!("{}", err),
             })?;
-        if let Some(path) = command.state_file {
-            saved_state::save(&state, &path)?;
-        }
     }
 
     info!("Done.");
