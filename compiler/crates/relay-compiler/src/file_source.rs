@@ -33,6 +33,7 @@ pub use file_group::FileGroup;
 use graphql_watchman::WatchmanFileSourceResult;
 use graphql_watchman::WatchmanFileSourceSubscription;
 use graphql_watchman::WatchmanFileSourceSubscriptionNextChange;
+use log::warn;
 pub use read_file_to_string::read_file_to_string;
 use serde::Deserialize;
 use serde_bser::value::Value;
@@ -87,10 +88,25 @@ impl FileSource {
     ) -> Result<CompilerState> {
         match self {
             Self::Watchman(file_source) => file_source.query(perf_logger_event, perf_logger).await,
-            // External inputs explicitly replace Watchman. Report invalid state or
-            // deltas to the caller rather than implicitly requiring a daemon or
-            // hiding input errors behind a different compilation mode.
-            Self::External(file_source) => file_source.create_compiler_state(perf_logger),
+            Self::External(file_source) => {
+                let result = file_source.create_compiler_state(perf_logger);
+                if let Err(err) = &result {
+                    perf_logger_event.string(
+                        "external_file_source_create_compiler_state_error",
+                        format!("{err:?}"),
+                    );
+                    warn!(
+                        "Unable to create state from external source: {err:?}. Sending a full watchman query..."
+                    );
+                    let watchman_file_source =
+                        WatchmanFileSource::connect(&file_source.config, perf_logger_event).await?;
+                    watchman_file_source
+                        .full_query(perf_logger_event, perf_logger)
+                        .await
+                } else {
+                    result
+                }
+            }
             Self::WalkDir(file_source) => file_source.create_compiler_state(perf_logger),
         }
     }

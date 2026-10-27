@@ -2,7 +2,8 @@
 
 The existing `relay` executable can reuse native compiler state with a caller-supplied
 file delta. This exposes the existing `FileSourceKind::External` implementation;
-there is no additional executable, npm package, build pipeline, or Watchman service.
+there is no additional executable, npm package, or build pipeline. Successful external
+state loading does not require Watchman; upstream's recovery path still does.
 
 ## CLI
 
@@ -21,7 +22,8 @@ Omit `--validate` for normal artifact generation.
 - `--state-file` alone performs a **full compilation**, without loading any existing
   checkpoint, and creates or replaces that checkpoint after success.
 - Adding `--changed-files` loads the checkpoint and applies the complete delta. This
-  requires an existing, compatible checkpoint; there is no implicit full fallback.
+  needs an existing, compatible checkpoint for an incremental run. Upstream's full
+  Watchman fallback remains unchanged if external-state setup fails.
 - Successful runs serialize to a temporary sibling directory, finish all buffered
   writes, and atomically rename the completed file over the checkpoint. Validation,
   serialization, or replacement failures leave the previous checkpoint unchanged.
@@ -51,7 +53,8 @@ The input is a JSON array, not the entire Watchman protocol response:
 ```
 
 - `name` is relative to the **configured Relay root**, not the process working directory.
-  Absolute, drive-prefixed, parent-traversal, and empty paths are rejected.
+  Absolute, drive-prefixed, parent-traversal, and empty paths are rejected by the
+  external reader (which triggers upstream's recovery path).
 - If `exists` is omitted, the compiler checks the path under that root.
 - Include **every** relevant change since the saved state: sources, schema,
   extensions/resolvers, and generated artifacts, including edits and deletions.
@@ -69,11 +72,19 @@ project selection, and source/sparse-checkout scope. The native saved-state vers
 check remains enabled by default; do not bypass it in CI. Callers must separately
 key snapshots by compiler build and checkout scope.
 
-In incremental mode, invalid/missing state, version mismatches, or invalid
-changed-files input fail the command. External mode no longer silently attempts a full Watchman query. The caller
-can deliberately choose a full run when its snapshot is unavailable/incompatible;
-**do not blindly retry every nonzero validation exit**, since artifact/GraphQL errors
-must remain failures. Failed compilation/validation does not write output state.
+Upstream's `FileSource::External` recovery policy is unchanged: failures while
+creating state from external inputs (including missing/invalid state, version
+mismatches or invalid deltas) log a warning and attempt a full Watchman query.
+This fallback can succeed if Watchman is available. It does not consult
+`FORCE_NO_WATCHMAN`, which only controls normal CLI file-source selection. Therefore,
+a successful command is not by itself evidence of an incremental hit.
+
+If a caller knows its snapshot is unavailable, it can deliberately request full
+compilation by omitting `--changed-files` (with `FORCE_NO_WATCHMAN=1` to use WalkDir).
+A strict no-Watchman/error-on-invalid-input CI policy is not implemented by these
+flags. Resolve that integration contract before rollout; do not change the shared
+fallback policy for other callers. **Do not blindly retry nonzero validation exits**:
+failed compilation/validation does not write output state.
 
 Ordinary invocations without these flags keep their current Watchman/WalkDir selection,
 artifact generation, validation, and persistence behavior. In particular, this change

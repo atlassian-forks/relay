@@ -60,6 +60,9 @@ impl Fixture {
             // Deliberately different from config.root, including for omitted exists.
             .current_dir(self.root.join("runner"))
             .env("FORCE_NO_WATCHMAN", "1")
+            // No host Watchman executable: external-state fallback must fail
+            // deterministically instead of connecting to a developer's daemon.
+            .env("PATH", self.root.join("runner"))
             .env_remove("RELAY_COMPILER_IGNORE_SAVED_STATE_VERSION")
             .arg(self.root.join("relay.config.json"))
             .args(args)
@@ -198,7 +201,7 @@ fn omitted_exists_is_resolved_against_config_root() {
 }
 
 #[test]
-fn invalid_state_or_delta_fails_without_watchman_or_output_state() {
+fn invalid_external_inputs_retain_upstream_watchman_fallback() {
     for case in [
         "missing-state",
         "corrupt-state",
@@ -229,7 +232,7 @@ fn invalid_state_or_delta_fails_without_watchman_or_output_state() {
         let original = fs::read(fixture.root.join("state.bin")).ok();
         let diagnostic = failure(fixture.incremental(true));
         assert!(
-            !diagnostic.to_lowercase().contains("watchman"),
+            diagnostic.to_lowercase().contains("watchman"),
             "{case}: {diagnostic}"
         );
         assert_eq!(
