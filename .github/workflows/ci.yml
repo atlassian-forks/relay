@@ -218,17 +218,14 @@ jobs:
         run: sudo apt install ${{ matrix.target.packages }} -y
       - name: Install cross
         if: matrix.target.cross
-        uses: actions-rs/cargo@v1
-        with:
-          command: install
-          args: cross
+        run: cargo install cross --version 0.2.4 --locked
       # Current published version of cross only works correctly if run from compiler directory
       # See related issue https://github.com/cross-rs/cross/issues/615
       # actions-rs/cargo@v1 does not support this option https://github.com/actions-rs/cargo/pull/59
       # Either we need to install cross from git or manually run cargo / cross instead of using action
       - name: Build project
         working-directory: compiler
-        run: ${{ matrix.target.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target.target }} ${{ matrix.target.features && '--features' }} ${{ matrix.target.features }}
+        run: ${{ matrix.target.cross && 'cross' || 'cargo' }} build --locked --release --target ${{ matrix.target.target }} ${{ matrix.target.features && '--features' }} ${{ matrix.target.features }}
       - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.target.artifact-name }}
