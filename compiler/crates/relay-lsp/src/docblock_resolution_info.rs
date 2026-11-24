@@ -12,6 +12,7 @@ use relay_docblock::DocblockIr;
 use relay_docblock::ResolverFieldDocblockIr;
 use relay_docblock::ResolverTypeDocblockIr;
 
+#[allow(dead_code)]
 pub enum DocblockResolutionInfo {
     Type(StringKey),
     RootFragment(FragmentDefinitionName),

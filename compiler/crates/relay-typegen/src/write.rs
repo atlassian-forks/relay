@@ -620,10 +620,15 @@ fn write_fragment_imports(
                 } else {
                     let fragment_location = typegen_context
                         .fragment_locations
-                        .location(&current_referenced_fragment)
-                        .unwrap_or_else(|| {
-                            panic!("Expected location for fragment {current_referenced_fragment}.")
-                        });
+                        .location(&current_referenced_fragment);
+
+                    if fragment_location.is_none() {
+                        // When the fragment is from "base" project, the file won't be located in typegen_context at this stage
+                        // This is due to a limitation in the process. Also this block has no effect for typescript so it can be safely ignored.
+                        continue;
+                    }
+
+                    let fragment_location = fragment_location.unwrap();
 
                     let fragment_import_path =
                         typegen_context.project_config.js_module_import_identifier(
