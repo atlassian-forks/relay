@@ -121,6 +121,35 @@ struct CompileCommand {
     /// writing to disk
     #[clap(long)]
     validate: bool,
+
+    /// Atlassian: after a full (Watchman/WalkDir) compile completes
+    /// successfully, serialize the resulting CompilerState checkpoint to this
+    /// path (zstd + bincode) via `CompilerState::serialize_to_file`. Saving only
+    /// happens in the non-watch compile path, so it conflicts with `--watch`.
+    #[clap(long = "save-state", conflicts_with = "watch")]
+    save_state: Option<PathBuf>,
+
+    /// Atlassian: load a previously saved CompilerState checkpoint from
+    /// this path (sets `config.load_saved_state_file`). Must be combined with
+    /// `--changed-files` to drive an incremental compile; on its own it is also
+    /// honoured by the Watchman file source for a watchman-backed incremental
+    /// query.
+    #[clap(long = "load-saved-state")]
+    load_saved_state: Option<PathBuf>,
+
+    /// Atlassian: path to a JSON array of `{ "name", "exists" }` entries
+    /// describing the files that changed since the saved state was taken. Sets
+    /// the file source to `FileSourceKind::External`, which replaces the
+    /// Watchman/WalkDir full crawl with saved-state + this changed-files list.
+    /// Requires `--load-saved-state` (the External source reads the checkpoint it
+    /// points at) and conflicts with `--watch` (the External source cannot drive
+    /// watch mode).
+    #[clap(
+        long = "changed-files",
+        requires = "load_saved_state",
+        conflicts_with = "watch"
+    )]
+    changed_files: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -365,6 +394,14 @@ async fn handle_compiler_command(command: CompileCommand) -> Result<(), Error> {
         config.artifact_writer = Box::<ArtifactValidationWriter>::default();
     }
 
+    // Atlassian: expose the already-existing saved-state / incremental
+    // plumbing via the CLI. `--load-saved-state` points at a serialized
+    // CompilerState checkpoint; the External file source reads it in
+    // `ExternalFileSource::create_compiler_state`.
+    if let Some(load_saved_state) = command.load_saved_state.clone() {
+        config.load_saved_state_file = Some(load_saved_state);
+    }
+
     config.create_operation_persister = Some(Box::new(|project_config| {
         project_config.persist.as_ref().map(
             |persist_config| -> Box<dyn OperationPersister + Send + Sync> {
@@ -380,7 +417,12 @@ async fn handle_compiler_command(command: CompileCommand) -> Result<(), Error> {
         )
     }));
 
-    config.file_source_config = if should_use_watchman() {
+    // Atlassian: when `--changed-files` is provided, drive the compile
+    // from the External file source (saved state + changed-files list) instead
+    // of a full Watchman/WalkDir crawl. Absent the flag, behavior is unchanged.
+    config.file_source_config = if let Some(changed_files) = command.changed_files.clone() {
+        FileSourceKind::External(changed_files)
+    } else if should_use_watchman() {
         FileSourceKind::Watchman
     } else {
         FileSourceKind::WalkDir
@@ -404,12 +446,30 @@ async fn handle_compiler_command(command: CompileCommand) -> Result<(), Error> {
             details: format!("{:?}", err),
         })?;
     } else {
-        compiler
+        // `Compiler::compile` already returns the resulting `CompilerState`, so
+        // exposing it for `--save-state` needs no change to the compiler crate:
+        // we simply serialize the state it hands back.
+        let compiler_state = compiler
             .compile()
             .await
             .map_err(|err| Error::CompilerError {
                 details: format!("{}", err),
             })?;
+
+        // Atlassian: persist the post-compile checkpoint so a later run
+        // can load it with `--load-saved-state` and compile incrementally.
+        if let Some(save_state_path) = command.save_state.clone() {
+            compiler_state
+                .serialize_to_file(&save_state_path)
+                .map_err(|err| Error::CompilerError {
+                    details: format!(
+                        "Failed to save compiler state to {}: {}",
+                        save_state_path.display(),
+                        err
+                    ),
+                })?;
+            info!("Saved compiler state to {}", save_state_path.display());
+        }
     }
 
     info!("Done.");
@@ -513,4 +573,87 @@ fn should_use_watchman() -> bool {
         .args(["list-capabilities"])
         .output()
         .is_ok()
+}
+
+#[cfg(test)]
+mod saved_state_cli_tests {
+    //! Atlassian: argument-parsing guards for the saved-state / incremental
+    //! flags. These lock in the supported flag combinations (including the exact
+    //! ones the AFM pre-commit wrapper emits) and the combinations that must be
+    //! rejected before any compile runs.
+    use clap::Parser;
+    use clap::error::ErrorKind;
+
+    use super::Opt;
+
+    fn parse(args: &[&str]) -> Result<Opt, clap::Error> {
+        Opt::try_parse_from(args)
+    }
+
+    #[test]
+    fn save_state_alone_is_allowed() {
+        // Cold wrapper invocation: build a fresh checkpoint, no load/changed set.
+        assert!(parse(&["relay", "--save-state", "/tmp/state.bin"]).is_ok());
+    }
+
+    #[test]
+    fn save_load_and_changed_files_together_is_allowed() {
+        // Warm wrapper invocation: load the checkpoint, compile the changed set,
+        // and re-save. All three saved-state flags are passed together.
+        assert!(
+            parse(&[
+                "relay",
+                "--save-state",
+                "/tmp/state.bin",
+                "--load-saved-state",
+                "/tmp/state.bin",
+                "--changed-files",
+                "/tmp/changed.json",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn load_saved_state_alone_is_allowed() {
+        // Watchman-backed incremental query (no `--changed-files`) stays valid.
+        assert!(parse(&["relay", "--load-saved-state", "/tmp/state.bin"]).is_ok());
+    }
+
+    #[test]
+    fn changed_files_requires_load_saved_state() {
+        // Without `--load-saved-state` the External source would `unwrap()` a
+        // `None` saved-state path and panic deep in the compiler; reject it here.
+        let err = parse(&["relay", "--changed-files", "/tmp/changed.json"])
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn watch_conflicts_with_changed_files() {
+        // `--changed-files` selects the External source, which cannot drive watch
+        // mode (the existing watch guard would panic). Reject at parse time.
+        let err = parse(&[
+            "relay",
+            "--watch",
+            "--load-saved-state",
+            "/tmp/state.bin",
+            "--changed-files",
+            "/tmp/changed.json",
+        ])
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn watch_conflicts_with_save_state() {
+        // Saving only happens in the non-watch compile path, so `--save-state`
+        // under `--watch` would silently never write a checkpoint. Reject it.
+        let err = parse(&["relay", "--watch", "--save-state", "/tmp/state.bin"])
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
 }
