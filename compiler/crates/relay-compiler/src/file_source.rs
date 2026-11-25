@@ -95,14 +95,47 @@ impl FileSource {
                         "external_file_source_create_compiler_state_error",
                         format!("{err:?}"),
                     );
-                    warn!(
-                        "Unable to create state from external source: {err:?}. Sending a full watchman query..."
-                    );
-                    let watchman_file_source =
-                        WatchmanFileSource::connect(&file_source.config, perf_logger_event).await?;
-                    watchman_file_source
-                        .full_query(perf_logger_event, perf_logger)
-                        .await
+                    // Atlassian: a failed saved-state / external load must degrade
+                    // to a *full* compile, and the fallback itself must never
+                    // become a hard failure. Prefer Watchman only when it looks
+                    // usable; but if Watchman is explicitly disabled
+                    // (FORCE_NO_WATCHMAN), missing, or present-but-unusable (the
+                    // connect or full query fails), fall through to a full WalkDir
+                    // crawl, which performs the same complete, correct scan with no
+                    // daemon. Previously a full Watchman query was forced
+                    // unconditionally, so a `should_use_watchman()` false positive
+                    // (e.g. an installed-but-broken daemon) turned a recoverable
+                    // bad checkpoint into a fatal error.
+                    if should_use_watchman() {
+                        warn!(
+                            "Unable to create state from external source: {err:?}. Attempting a full watchman query..."
+                        );
+                        let watchman_state = async {
+                            let watchman_file_source =
+                                WatchmanFileSource::connect(&file_source.config, perf_logger_event)
+                                    .await?;
+                            watchman_file_source
+                                .full_query(perf_logger_event, perf_logger)
+                                .await
+                        }
+                        .await;
+                        match watchman_state {
+                            Ok(compiler_state) => Ok(compiler_state),
+                            Err(watchman_err) => {
+                                warn!(
+                                    "Watchman fallback failed ({watchman_err:?}); falling back to a full WalkDir crawl..."
+                                );
+                                WalkDirFileSource::new(Arc::clone(&file_source.config))
+                                    .create_compiler_state(perf_logger)
+                            }
+                        }
+                    } else {
+                        warn!(
+                            "Unable to create state from external source: {err:?}. Watchman is disabled or unavailable; falling back to a full WalkDir crawl..."
+                        );
+                        WalkDirFileSource::new(Arc::clone(&file_source.config))
+                            .create_compiler_state(perf_logger)
+                    }
                 } else {
                     result
                 }
@@ -210,4 +243,18 @@ impl FileSourceSubscription {
 #[derive(Debug)]
 pub enum FileSourceSubscriptionNextChange {
     Watchman(WatchmanFileSourceSubscriptionNextChange),
+}
+
+/// Atlassian: crate-internal mirror of the relay-bin `should_use_watchman`
+/// check, so fallbacks inside the compiler (e.g. a failed external/saved-state
+/// load) honour `FORCE_NO_WATCHMAN` and Watchman availability instead of always
+/// forcing a Watchman crawl.
+fn should_use_watchman() -> bool {
+    if std::env::var("FORCE_NO_WATCHMAN").is_ok() {
+        return false;
+    }
+    std::process::Command::new("watchman")
+        .args(["list-capabilities"])
+        .output()
+        .is_ok()
 }
